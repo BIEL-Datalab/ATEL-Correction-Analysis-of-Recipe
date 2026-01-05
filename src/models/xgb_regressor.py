@@ -9,7 +9,6 @@ from optuna.integration import XGBoostPruningCallback
 from sklearn.metrics import root_mean_squared_error, r2_score
 from src.models.base import BaseRegressor
 from typing import List, Tuple, Dict, Union
-from src.constants import *
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -40,7 +39,7 @@ class XGBRegressor(BaseRegressor):
 
     def fit(
         self, train: pd.DataFrame, valid: pd.DataFrame, targets: List[str]
-    ) -> Tuple[xgb.Booster, Dict[str, Union[str, float]]]:
+    ) -> Tuple[xgb.Booster, Dict[str, float]]:
         """
         对单个目标变量进行训练
         XGB 不支持多变量回归任务。
@@ -122,7 +121,7 @@ class XGBRegressor(BaseRegressor):
                 "lambda": trial.suggest_float("lambda", 1e-3, 10.0, log=True),
                 "alpha": trial.suggest_float("alpha", 1e-3, 10.0, log=True),
                 # 其他参数
-                "random_state": RANDOM_STATE,
+                "random_state": self.random_state,
                 "n_jobs": self.n_jobs,
             }
             pruning_callback = XGBoostPruningCallback(
@@ -144,13 +143,13 @@ class XGBRegressor(BaseRegressor):
             direction="minimize",
             sampler=optuna.samplers.TPESampler(
                 n_startup_trials=self.n_trials // 10,
-                seed=RANDOM_STATE,
+                seed=self.random_state,
                 multivariate=True,
             ),
         )
         study.optimize(
             objective,
-            n_trials=N_TRIALS,
+            n_trials=self.n_trials,
             n_jobs=self.n_jobs,
             show_progress_bar=True,
         )
