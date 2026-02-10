@@ -3,12 +3,10 @@ import pandas as pd
 from pathlib import Path
 from typing import Union, Dict, List, Literal
 from src.models.base import BaseRegressor
-from src.data_preprocessor import TabularPreprocessor
 
 
 def export_prediction_anomalies(
     models: Union[BaseRegressor, Dict[str, BaseRegressor]],
-    preprocessor: TabularPreprocessor,
     train: pd.DataFrame,
     valid: pd.DataFrame,
     feature_cols: List[str],
@@ -23,6 +21,8 @@ def export_prediction_anomalies(
 
     Args:
     -
+
+
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -34,6 +34,8 @@ def export_prediction_anomalies(
         all_records = []
 
         for split_name, df in [("train", train), ("valid", valid)]:
+            if target not in df.columns:
+                raise KeyError(f"{split_name} 数据中不存在目标列 {target}")
             y_true = df[target].values
             y_pred = model.predict(df[feature_cols])
 
@@ -44,14 +46,17 @@ def export_prediction_anomalies(
 
             top_k_idx = np.argsort(error)[-top_k:][::-1]
             top_k_df = df.iloc[top_k_idx].copy()
-            top_k_df[f"{target}_pred"] = y_pred[top_k_idx]
-            top_k_df[f"{target}_{error_type}_error"] = error[top_k_idx]
+            top_k_df[f"{target}_pred"] = y_pred[top_k_idx].astype(float)
+            top_k_df[f"{target}_{error_type}_error"] = error[top_k_idx].astype(float)
             top_k_df["data_split"] = split_name
             all_records.append(top_k_df)
 
-        if all_records:
-            anomaly_df = pd.concat(all_records, axis=0)
-            anomaly_df = preprocessor.inverse_transform(anomaly_df)
-            save_path = output_dir / f"{target}_anomalies.csv"
-            anomaly_df.to_csv(save_path, index=False)
-            print(f"目标变量 {target} 异常样本 Top {top_k} 已保至 {save_path}")
+        if not all_records:
+            continue
+        anomaly_df = pd.concat(all_records, axis=0)
+        anomaly_df[[f"{target}_pred", f"{target}_{error_type}_error"]] = anomaly_df[
+            [f"{target}_pred", f"{target}_{error_type}_error"]
+        ].astype(float)
+        save_path = output_dir / f"{target}_anomalies.csv"
+        anomaly_df.to_csv(save_path, index=False, float_format="%.6f")
+        print(f"目标变量 {target} 异常样本 Top {top_k} 已保至 {save_path}")

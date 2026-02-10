@@ -1,13 +1,7 @@
-# 常数
-RANDOM_STATE = 42
-N_TRIALS = 1500
-TEST_SIZE = 0.2
-
-# 相关字段
 # 机台相关
 MACHINE_COLS = ["machine_sn"]
 # 其他信息
-OTHER_INFO_COLS = ["row_id", "batch_log"]
+OTHER_INFO_COLS = ["index", "batch_log"]
 # recipe 相关
 N_LAYERS_RECIPE = 11
 RECIPE_LAYER_INDEX = range(1, N_LAYERS_RECIPE + 1)
@@ -24,19 +18,21 @@ BATCH_NUMBER_COLS = ["batch_number"]
 
 # 检测结果列
 COLOR_COLS = [
-    "C3_10_Y_min",
-    "C3_10_Y_max",
-    "C3_10_a_min",
-    "C3_10_a_max",
-    "C3_10_b_min",
-    "C3_10_b_max",
-    "C3_45_a_min",
-    "C3_45_a_max",
-    "C3_45_b_min",
-    "C3_45_b_max",
+    "c3_10_y_min",
+    "c3_10_y_max",
+    "c3_10_a_min",
+    "c3_10_a_max",
+    "c3_10_b_min",
+    "c3_10_b_max",
+    "c3_45_a_min",
+    "c3_45_a_max",
+    "c3_45_b_min",
+    "c3_45_b_max",
 ]
 TRANSMITTANCE_COLS = [
-    "T_0Deg_400_770_AVG_min",
-    "T_0Deg_940_min",
-    "T_40Deg_920_960_AVG_min",
+    "t_0deg_400_770_avg_min",
+    "t_0deg_940_min",
+    "t_40deg_920_960_avg_min",
 ]
+# 目标变量分组
+TARGET_GROUPS = {"color": COLOR_COLS, "trans": TRANSMITTANCE_COLS}
