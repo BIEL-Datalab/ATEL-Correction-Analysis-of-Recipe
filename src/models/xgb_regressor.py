@@ -7,42 +7,78 @@ import optuna
 from pathlib import Path
 from optuna.integration import XGBoostPruningCallback
 from sklearn.metrics import root_mean_squared_error, r2_score
+from typing import List, Tuple, Dict, Union, Any, Optional
 from src.models.base import BaseRegressor
-from typing import List, Tuple, Dict, Union
+from src.constants.data_constants import (
+    ACT_RATE_NM_SEC_COLS,
+    RATE_COEF_COLS,
+    BATCH_NUMBER_COLS,
+    MACHINE_COLS,
+)
+from src.constants.train_constants import (
+    RANDOM_STATE,
+    TREE_DEFAULT_NUM_BOOST_ROUND,
+    TREE_DEFAULT_EARLY_STOPPING_ROUND,
+    TREE_DEFAULT_N_TRIALS,
+    TREE_N_JOBS,
+)
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
 class XGBRegressor(BaseRegressor):
+    """
+    XGB 单目标回归封装类
+    """
+
+    MISSING_TOKEN = "missing"
+    DEFAULT_NUM_COLS = ACT_RATE_NM_SEC_COLS + RATE_COEF_COLS + BATCH_NUMBER_COLS
+    DEFAULT_CAT_COLS = MACHINE_COLS
+    DEFAULT_DATE_COLS = []
+
     def __init__(
         self,
-        feature_cols,
-        num_boost_round: int = 1000,
-        early_stopping_rounds: int = 50,
-        n_trials: int = 100,
-        n_jobs: int = 1,
-        random_state=42,
+        num_cols: Optional[List[str]] = None,
+        cat_cols: Optional[List[str]] = None,
+        num_boost_round: Optional[int] = None,
+        early_stopping_rounds: Optional[int] = None,
+        n_trials: Optional[int] = None,
+        n_jobs: Optional[int] = None,
+        random_state: Optional[int] = None,
     ):
         """
         基于 XGBoost 的单目标回归模型封装类。
         """
-        # 参数
-        super().__init__(feature_cols, random_state, multi_target=False)
-        self.num_boost_round = num_boost_round
-        self.early_stopping_rounds = early_stopping_rounds
-        self.n_trials = n_trials
-        self.n_jobs = n_jobs
+        self.num_cols = num_cols or self.DEFAULT_NUM_COLS
+        self.cat_cols = cat_cols or self.DEFAULT_CAT_COLS
+        random_state = random_state or RANDOM_STATE
+        super().__init__(
+            feature_cols=self.num_cols + self.cat_cols,
+            random_state=random_state,
+            multi_target=False,
+        )
+        self.num_boost_round = num_boost_round or TREE_DEFAULT_NUM_BOOST_ROUND
+        self.early_stopping_rounds = (
+            early_stopping_rounds or TREE_DEFAULT_EARLY_STOPPING_ROUND
+        )
+        self.n_trials = n_trials or TREE_DEFAULT_N_TRIALS
+        self.n_jobs = n_jobs or TREE_N_JOBS
         # 最佳模型
-        self.best_params: Dict[str, float] | None = None
-        self.targets: str | None = None
+        self.best_params: Dict[str, Any] | None = None
+        self.model: xgb.Booster | None = None
+        self.target_cols: List[str] | None = None
         self.metrics: Dict[str, float] | None
+        # 训练类别映射
+        self._cat_mappings: Dict[str, List[str]] = {}
 
     def fit(
-        self, train: pd.DataFrame, valid: pd.DataFrame, targets: List[str]
+        self,
+        train: pd.DataFrame,
+        valid: pd.DataFrame,
+        target_cols: List[str],
     ) -> Tuple[xgb.Booster, Dict[str, float]]:
         """
-        对单个目标变量进行训练
-        XGB 不支持多变量回归任务。
+        XGB 对单个目标变量进行训练
 
         Args:
         - train(pd.DataFrame): 训练集
@@ -53,7 +89,9 @@ class XGBRegressor(BaseRegressor):
         - model(xgb.Booster): 最优参数下训练的 XGBoost 模型
         - metrics(Dict[str, float]): 验证集上的评估指标
         """
-        dtrain, dvalid, y_valid, target = self._prepare_data(train, valid, targets)
+        dtrain, dvalid, y_train, y_valid, target = self._prepare_data(
+            train, valid, target_cols
+        )
         self._optuna_search(dtrain, dvalid, y_valid)
         self.model = xgb.train(
             self.best_params,
@@ -63,11 +101,13 @@ class XGBRegressor(BaseRegressor):
             early_stopping_rounds=self.early_stopping_rounds,
             verbose_eval=self.num_boost_round // 5,
         )
-        preds = self.model.predict(dvalid)
-        self.targets = target
+        train_preds = self.model.predict(dtrain)
+        valid_preds = self.model.predict(dvalid)
+        self.target_cols = [target]
         self.metrics = {
-            "RMSE": root_mean_squared_error(y_valid, preds),
-            "R2": r2_score(y_valid, preds),
+            "Train_R2": r2_score(y_train, train_preds),
+            "Valid_R2": r2_score(y_valid, valid_preds),
+            "Valid_RMSE": root_mean_squared_error(y_valid, valid_preds),
         }
         return self.model, self.metrics
 
@@ -89,13 +129,24 @@ class XGBRegressor(BaseRegressor):
                 UserWarning,
             )
         target = target_cols[0]
-        X_train = train[self.feature_cols]
-        y_train = train[target]
-        X_valid = valid[self.feature_cols]
-        y_valid = valid[target]
-        dtrain = xgb.DMatrix(X_train, label=y_train)
-        dvalid = xgb.DMatrix(X_valid, label=y_valid)
-        return dtrain, dvalid, y_valid, target
+        X_train = train[self.feature_cols].copy()
+        y_train = train[target].copy()
+        X_valid = valid[self.feature_cols].copy()
+        y_valid = valid[target].copy()
+        # 分类变量处理
+        for col in self.cat_cols:
+            train_vals = X_train[col].fillna(self.MISSING_TOKEN).astype(str)
+            valid_vals = X_valid[col].fillna(self.MISSING_TOKEN).astype(str)
+            categories = sorted(train_vals.unique().tolist())
+            self._cat_mappings[col] = categories
+            X_train[col] = train_vals.astype("category")
+            X_valid[col] = valid_vals.apply(
+                lambda x: x if x in categories else self.MISSING_TOKEN
+            ).astype("category")
+
+        dtrain = xgb.DMatrix(X_train, label=y_train, enable_categorical=True)
+        dvalid = xgb.DMatrix(X_valid, label=y_valid, enable_categorical=True)
+        return dtrain, dvalid, y_train, y_valid, target
 
     def _optuna_search(
         self, dtrain: xgb.DMatrix, dvalid: xgb.DMatrix, y_valid: pd.Series
@@ -110,12 +161,12 @@ class XGBRegressor(BaseRegressor):
                 "objective": "reg:squarederror",
                 "eval_metric": "rmse",
                 # 学习率和树结构
-                "eta": trial.suggest_float("eta", 1e-3, 0.3),
-                "max_depth": trial.suggest_int("max_depth", 3, 20),
-                "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
-                "gamma": trial.suggest_float("gamma", 0, 5),
+                "eta": trial.suggest_float("eta", 1e-4, 0.5, log=True),
+                "max_depth": trial.suggest_int("max_depth", 5, 25),
+                "min_child_weight": trial.suggest_int("min_child_weight", 1, 15),
+                "gamma": trial.suggest_float("gamma", 0, 2),
                 # 采样策略
-                "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+                "subsample": trial.suggest_float("subsample", 0.7, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
                 # 正则化
                 "lambda": trial.suggest_float("lambda", 1e-3, 10.0, log=True),
@@ -142,7 +193,7 @@ class XGBRegressor(BaseRegressor):
         study = optuna.create_study(
             direction="minimize",
             sampler=optuna.samplers.TPESampler(
-                n_startup_trials=self.n_trials // 10,
+                n_startup_trials=max(1, self.n_trials // 10),
                 seed=self.random_state,
                 multivariate=True,
             ),
@@ -164,7 +215,18 @@ class XGBRegressor(BaseRegressor):
         if self.model is None:
             raise Exception("当前未训练模型，无法预测")
         if isinstance(X, pd.DataFrame):
-            X_mat = xgb.DMatrix(X[self.feature_cols])
+            X_copy = X[self.feature_cols].copy()
+            for col in self.cat_cols:
+                if col in X_copy:
+                    cats = self._cat_mappings[col]
+                    X_copy[col] = (
+                        X_copy[col]
+                        .fillna(self.MISSING_TOKEN)
+                        .astype(str)
+                        .apply(lambda x: x if x in cats else self.MISSING_TOKEN)
+                        .astype("category")
+                    )
+            X_mat = xgb.DMatrix(X_copy, enable_categorical=True)
         elif isinstance(X, np.ndarray):
             X_mat = xgb.DMatrix(X)
         elif isinstance(X, xgb.DMatrix):
@@ -173,45 +235,53 @@ class XGBRegressor(BaseRegressor):
             raise TypeError(f"无法识别的输入类型: {type(X)}")
         return self.model.predict(X_mat)
 
-    def save_model(self, path: Union[str, Path]):
+    def save_model(self, dir_path: Union[str, Path]):
         """
         保存模型和相关参数
         """
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        dir_path = Path(dir_path)
+        dir_path.mkdir(parents=True, exist_ok=True)
+        target = self.target_cols[0]
         # 保存模型
-        model_file = str(path.with_suffix(".bin"))
-        self.model.save_model(model_file)
+        model_path = dir_path / f"{target}.ubj"
+        self.model.save_model(str(model_path))
         # 保存模型元信息
         meta = {
-            "targets": self.targets,
+            "target_cols": self.target_cols,
             "metrics": self.metrics,
             "feature_cols": self.feature_cols,
+            "num_cols": self.num_cols,
+            "cat_cols": self.cat_cols,
+            "cat_mappings": self._cat_mappings,
             "best_params": self.best_params,
             "random_state": self.random_state,
         }
-        meta_file = str(path.with_suffix(".json"))
-        with open(meta_file, "w", encoding="utf-8") as f:
+        meta_path = dir_path / f"{target}.json"
+        with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=4, ensure_ascii=False)
 
     @classmethod
-    def load_model(cls, path: Union[str, Path]):
+    def load_model(cls, dir_path: Union[str, Path], model_name: str):
         """
         加载类
         """
-        path = Path(path)
-        meta_file = str(path.with_suffix(".json"))
-        model_file = str(path.with_suffix(".bin"))
-        with open(meta_file, "r", encoding="utf-8") as f:
+        dir_path = Path(dir_path)
+        model_path = dir_path / f"{model_name}.ubj"
+        meta_path = dir_path / f"{model_name}.json"
+        with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
         # 实例化
         obj = cls(
-            feature_cols=meta["feature_cols"], random_state=meta.get("random_state", 42)
+            num_cols=meta["num_cols"],
+            cat_cols=meta["cat_cols"],
+            random_state=meta.get("random_state", RANDOM_STATE),
         )
+        obj.feature_cols = meta["feature_cols"]
+        obj._cat_mappings = meta.get("cat_mappings", {})
         obj.best_params = meta.get("best_params")
-        obj.targets = meta.get("targets")
+        obj.target_cols = [meta.get("target_cols")]
         obj.metrics = meta.get("metrics")
         # 加载模型
         obj.model = xgb.Booster()
-        obj.model.load_model(model_file)
+        obj.model.load_model(model_path)
         return obj
