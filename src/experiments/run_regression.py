@@ -31,7 +31,7 @@ from src.analysis.data_description import batch_plot_targets
 from src.evaluation.evaluator import RegressionEvaluator
 
 pd.set_option("display.max_columns", None)
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 warnings.filterwarnings("ignore", message="The NumPy global RNG was seeded")
 logging.getLogger("shap").setLevel(logging.ERROR)
 logging.getLogger("shap.explainers").setLevel(logging.ERROR)
@@ -68,7 +68,6 @@ def choose_model(args: argparse.Namespace) -> Tuple[BaseRegressor, bool]:
                 batch_size=args.batch_size,
                 random_state=args.random_state,
                 n_trials=args.n_trials,
-                checkpoint_dir=Path(args.model_dir) / f"{args.model_type}_checkpoints",
                 acc=args.acc,
             ),
             False,
@@ -146,8 +145,9 @@ def train_or_load_multi_model(
         else:
             logging.info(f"加载 {args.model_type} 模型")
             modelcls = MODEL_REGISTRY[args.model_type]
-            model = modelcls.load_model(model_dir)
+            model = modelcls.load_model(model_dir / group_name / "model/best_model")
         all_models[group_name] = model
+    return all_models
 
 
 def run_regression(args: argparse.Namespace) -> None:
@@ -222,7 +222,11 @@ def run_regression(args: argparse.Namespace) -> None:
     # 模型测评
     if is_tree:
         # 树模型下所有目标变量一起做测评
-        eval_dir = Path(args.model_dir) / f"{args.model_type}_{run_date}/eval"
+        if args.mode == "train":
+            eval_dir = Path(args.model_dir) / f"{args.model_type}_{run_date}/eval"
+        else:
+            eval_dir = Path(args.model_dir) / "eval"
+        
         eval_dir.mkdir(parents=True, exist_ok=True)
         evaluator = RegressionEvaluator(
             num_cols=num_cols, cat_cols=cat_cols, output_dir=eval_dir
@@ -233,13 +237,18 @@ def run_regression(args: argparse.Namespace) -> None:
         logging.info(f"所有变量的模型测评结果已保存到 {eval_dir}")
     else:
         # 多目标模型下每个模型做一个测评
-        for group_name, model in all_model:
-            eval_dir = (
-                Path(args.model_dir) / f"{args.model_type}_{run_date}/{group_name}/eval"
-            )
+        for group_name, model in all_model.items():
+            if args.mode == "train":
+                eval_dir = (
+                    Path(args.model_dir) / f"{args.model_type}_{run_date}/{group_name}/eval"
+                )
+            else:
+                eval_dir = (
+                    Path(args.model_dir) / f"{group_name}/eval"
+                )
             eval_dir.mkdir(parents=True, exist_ok=True)
             evaluator = RegressionEvaluator(
-                num_cols=num_cols, cat_cols=cat_cols, output_dir=eval_dir
+                num_cols=num_cols, cat_cols=cat_cols, date_cols=model.date_feature_names,output_dir=eval_dir
             )
             evaluator.run_full_evaluation(
                 regressors=model,

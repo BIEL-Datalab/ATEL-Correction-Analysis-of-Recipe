@@ -1,13 +1,17 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import xgboost as xgb
+import lightgbm as lgbm
+import catboost
+from joblib import Parallel, delayed
 from pathlib import Path
 from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error
 import shap
-from typing import List, Optional, Union, Any, Dict, Tuple
+from typing import List, Optional, Union, Any, Dict, Tuple, Literal
 
 from src.models.base import BaseRegressor
-
+from src.constants.eval_constants import EPS, BG_DEFAULT_SAMPLE, NSAMPLES_DEFAULT, VAL_DEFAULT_SAMPLE, N_JOBS_DEFAULT, MAX_DISPLAY
 
 class RegressionEvaluator:
     """
@@ -16,20 +20,25 @@ class RegressionEvaluator:
 
     def __init__(
         self,
-        feature_cols: List[str],
+        num_cols: List[str],
+        cat_cols: List[str],
         output_dir: Optional[Union[Path, str]],
         date_cols: Optional[List[str]] = None,
-        eps: float = 1e-8,
+        eps: float = EPS,
+        random_state: int = 42,
     ):
         """
         Args:
-        - feature_cols(List[str]): 特征列名列表
+        -
         - output_dir(Optional[Union[Path, str]]): 结果保存路径，为 None 则不保存
         - eps(float): 用于计算相对误差的极小值，防止除零
         """
-        self.feature_cols = feature_cols
+        self.num_cols = num_cols
+        self.cat_cols = cat_cols
         self.date_cols = date_cols or []
+        self.feature_cols = num_cols + cat_cols + self.date_cols
         self.eps = eps
+        self.random_state = random_state
         if output_dir:
             self.output_dir = Path(output_dir)
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -63,100 +72,212 @@ class RegressionEvaluator:
         shap_dir.mkdir(exist_ok=True)
         return shap_dir
 
-    def _build_tabular_predict_func(
+    def _convert_date_cols(self, X_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        转换时间特征
+        """
+        X = X_df.copy()
+        for col in self.date_cols:
+            if col in X.columns:
+                X[col] = pd.to_datetime(X[col]).apply(
+                    lambda x: x.toordinal() if pd.notnull(x) else 0
+                )
+        return X
+
+    def _sample_valid_set(
         self,
-        model: BaseRegressor,
-        target_cols: List[str],
+        X_val_df: pd.DataFrame,
+        min_samples: int = 500,
+    ) -> pd.DataFrame:
+        """
+        验证集抽样(至少抽取三分之一的样本)
+        """
+        n_samples = max(min_samples, len(X_val_df) // 3)
+        n_samples = min(len(X_val_df), n_samples)
+        return X_val_df.sample(n=n_samples, random_state=self.random_state)
+    
+    def _is_tree_model(self, model):
+        """
+        判断是否为树模型
+        """
+        return isinstance(
+            model, (xgb.Booster, lgbm.Booster, catboost.CatBoost)
+        )
+
+    def _shap_compute_general(
+        self,
+        regressors: Union[BaseRegressor, Dict[str, BaseRegressor]],
+        X_val_df: pd.DataFrame,
+        bg_sample: int = BG_DEFAULT_SAMPLE,
+        nsamples: int = NSAMPLES_DEFAULT,
+        val_sample: int = VAL_DEFAULT_SAMPLE,
+        n_jobs: int = N_JOBS_DEFAULT,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        通用 SHAP 值计算函数
+
+        Args:
+        -
+
+        Returns:
+        -
+        """
+        X_sample = self._sample_valid_set(X_val_df, val_sample)
+        if isinstance(regressors, dict):
+            # 多个单目标树模型才以 dict 格式传入
+            for regressor in regressors.values():
+                if not self._is_tree_model(regressor.model) and not regressor.multi_target:
+                    raise ValueError(
+                        "只有 XGB / LGBM / Catboost 支持多个单目标模型 shap 值计算"
+                    )
+            def compute_tree_shap(regressor: BaseRegressor):
+                explainer = shap.TreeExplainer(regressor.model)
+                sv = explainer.shap_values(X_sample)
+                if isinstance(sv, list):
+                    sv = sv[0]
+                return sv
+            shap_values_list = Parallel(n_jobs=n_jobs, backend="threading")(
+                delayed(compute_tree_shap)(regressor)
+                for regressor in regressors.values()
+            )
+            shap_results = {
+                tgt: {
+                    "shap_values": sv, 
+                    "X": X_sample
+                }
+                for tgt, sv in zip(regressors.keys(), shap_values_list)
+            }
+            return shap_results
+        elif isinstance(regressors, BaseRegressor) and regressors.multi_target:
+            model = regressors
+            target_cols = getattr(regressors, "target_cols", None)
+            if target_cols is None:
+                raise ValueError("多目标模型必须提供 target_cols 属性")
+            # 定义多目标模型预测函数
+            def predict_func(X_np: np.ndarray) -> np.ndarray:
+                """
+                为 pytorch_tabular 多目标模型构造 SHAP 所需的 predict 函数
+                """
+                X_df = pd.DataFrame(X_np, columns=self.feature_cols)
+                preds_df = regressors.model.predict(X_df)
+                pred_cols = [f"{t}_prediction" for t in target_cols]
+                return preds_df[pred_cols].values
+            
+            bg_df = X_sample.sample(
+                min(bg_sample, len(X_sample)),
+                random_state=self.random_state
+            )
+            explainer = shap.KernelExplainer(
+                predict_func,
+                bg_df.values,
+            )
+            shap_values = explainer.shap_values(
+                X_sample.values, nsamples=min(nsamples, len(X_sample))
+            )
+            if isinstance(shap_values, list):
+                shap_values = np.array(shap_values) # (n_targets, n_samples, n_features)
+                shap_values = np.transpose(shap_values, (1, 2, 0))
+            return {
+                tgt: {
+                    "shap_values": shap_values[:, :, i] if shap_values.ndim == 3 else shap_values,
+                    "X": X_sample,
+                }
+                for i, tgt in enumerate(target_cols)
+            }
+        else:
+            raise ValueError("regressors 类型不合法")
+
+    def _plot_shap_summary(
+        self,
+        shap_values: np.ndarray,
+        X_df: pd.DataFrame,
+        target: str,
+        max_display: int,
+        shap_dir: Optional[Path],
     ):
         """
-        为 pytorch_tabular 多目标模型构造 SHAP 所需的 predict 函数
-        """
-
-        def predict_func(X_np: np.ndarray) -> np.ndarray:
-            X_df = pd.DataFrame(X_np, columns=self.feature_cols)
-            preds_df = model.model.predict(X_df)
-            pred_cols = [f"{t}_prediction" for t in target_cols]
-            return preds_df[pred_cols].values
-
-        return predict_func
-
-    def _shap_multi_model_single_target(
-        self,
-        models: Dict[str, BaseRegressor],
-        X_val_df: pd.DataFrame,
-    ) -> Dict[str, Dict[str, Any]]:
-        """
-        多个单目标模型输出 shap 值
-
-        Args:
-        - models(Dict[str, BaseRegressor])
-        - X_val_df(pd.DataFrame):
-        """
-        shap_results = {}
-        for tgt, model in models.items():
-            explainer = shap.Explainer(model.model)
-            sv = explainer(X_val_df).values
-            shap_results[tgt] = {"shap_values": sv, "X": X_val_df}
-        return shap_results
-
-    def _shap_single_model_multi_target(
-        self,
-        model: BaseRegressor,
-        X_val_df: pd.DataFrame,
-        target_cols: List[str],
-        bg_sample: int,
-        nsamples: int,
-    ) -> Dict[str, Dict[str, Any]]:
-        """
-        多目标模型输出 shap 值
+        绘制 SHAP 总结图
 
         Args:
         -
-        -
-        -
+
         """
-        assert model.multi_target, "多目标模型 multi_target 必须为 True"
-        predict_func = self._build_tabular_predict_func(model, target_cols)
-        background = shap.sample(X_val_df, bg_sample)
-        explainer = shap.KernelExplainer(
-            predict_func,
-            background.values,
-        )
-        shap_values = explainer.shap_values(X_val_df.values, nsamples=nsamples)
-        shap_results = {}
-        for i, tgt in enumerate(target_cols):
-            sv = (
-                shap_values[i]
-                if isinstance(shap_values, list)
-                else shap_values[:, :, i]
+        plt.figure(figsize=(20, 12))
+        shap.summary_plot(shap_values, X_df, max_display=max_display, show=False)
+        plt.title(f"SHAP Summary | {target}")
+        if shap_dir:
+            plt.savefig(
+                shap_dir / f"shap_summary_{target}.png", dpi=150, bbox_inches="tight"
             )
-            shap_results[tgt] = {"shap_values": sv, "X": X_val_df}
-        return shap_results
+        plt.close()
 
-    def _plot_shap_subplots(
+    def _plot_cat_shap_direction(
+        self,
+        shap_values: np.ndarray,
+        X_df: pd.DataFrame,
+        target: str,
+        shap_dir: Optional[Path],
+    ):
+        """
+        分类特征预测贡献图
+
+        Args:
+        -
+
+        """
+        for col in self.cat_cols:
+            if col not in X_df.columns:
+                continue
+            col_idx = X_df.columns.get_loc(col)
+            df = pd.DataFrame(
+                {
+                    "category": X_df[col].astype(str),
+                    "shap": shap_values[:, col_idx],
+                }
+            )
+            stat = (
+                df.groupby("category")["shap"]
+                .mean()
+                .reset_index()
+                .rename(columns={"shap": "mean_shap"})
+                .sort_values("mean_shap", ascending=False)
+            )
+            plt.figure(figsize=(8, 4))
+            colors = stat["mean_shap"].apply(
+                lambda x: "tab:red" if x > 0 else "tab:blue"
+            )
+            plt.bar(stat["category"], stat["mean_shap"], color=colors)
+            plt.axhline(0, linestyle="--", linewidth=1)
+            plt.title(f"{target} | Mean SHAP by category: {col}")
+            plt.ylabel("Mean SHAP (direction)")
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            if shap_dir:
+                plt.savefig(
+                    shap_dir / f"shap_cat_direction_{target}_{col}.png",
+                    dpi=150,
+                    bbox_inches="tight",
+                )
+            plt.close()
+
+    def _plot_shap_explanation(
         self,
         shap_results: Dict[str, Dict[str, Any]],
         max_display: int,
         shap_dir: Optional[Union[str, Path]] = None,
     ):
-        """ """
-        for i, (tgt, data) in enumerate(shap_results.items()):
+        """
+        绘制 shap 解释图：
+        - 全特征 SHAP 总结图
+        - 分类特征预测贡献图
+        """
+        for tgt, data in shap_results.items():
             sv = data["shap_values"]
-            X_df = data["X"].copy()
-            # 转换日期
-            for col in self.date_cols:
-                if col in X_df.columns:
-                    X_df[col] = pd.to_datetime(X_df[col]).apply(
-                        lambda x: x.toordinal() if pd.notnull(x) else 0
-                    )
-            plt.figure(figsize=(20, 12))
-            shap.summary_plot(sv, X_df, max_display=max_display, show=False)
-            plt.title(f"SHAP Summary | {tgt}")
-            if shap_dir:
-                plt.savefig(
-                    shap_dir / f"shap_summary_{tgt}.png", dpi=150, bbox_inches="tight"
-                )
-            plt.close()
+            X_df = self._convert_date_cols(data["X"])
+            # 全特征 SHAP 总结图
+            self._plot_shap_summary(sv, X_df, tgt, max_display, shap_dir)
+            # 分类特征预测贡献图
+            self._plot_cat_shap_direction(sv, X_df, tgt, shap_dir)
 
     def _save_shap_to_excel(
         self,
@@ -184,31 +305,50 @@ class RegressionEvaluator:
 
     def compute_metrics(
         self,
-        y_true: Union[np.ndarray, pd.DataFrame, List[np.ndarray]],
-        y_pred: Union[np.ndarray, pd.DataFrame, List[np.ndarray]],
+        train_y_true: Union[np.ndarray, pd.DataFrame, List[np.ndarray]],
+        train_y_pred: Union[np.ndarray, pd.DataFrame, List[np.ndarray]],
+        valid_y_true: Union[np.ndarray, pd.DataFrame, List[np.ndarray]],
+        valid_y_pred: Union[np.ndarray, pd.DataFrame, List[np.ndarray]],
         target_cols: Optional[List[str]] = None,
+        n_digits: int = 4,
     ) -> pd.DataFrame:
         """
         计算回归指标
+
+        Args:
+        -
+
+        Returns:
+        -
         """
-        y_true = self._to_numpy(y_true, target_cols)
-        y_pred = self._to_numpy(y_pred, target_cols)
-        assert y_true.shape == y_pred.shape, "y_true 与 y_pred 形状不匹配"
+        train_y_true = self._to_numpy(train_y_true, target_cols)
+        train_y_pred = self._to_numpy(train_y_pred, target_cols)
+        valid_y_true = self._to_numpy(valid_y_true, target_cols)
+        valid_y_pred = self._to_numpy(valid_y_pred, target_cols)
+        assert (
+            train_y_true.shape == train_y_pred.shape
+        ), f"训练集 y_true 与 y_pred 形状不匹配，{train_y_true.shape} != {train_y_pred.shape}"
+        assert (
+            valid_y_true.shape == valid_y_pred.shape
+        ), f"验证集 y_true 与 y_pred 形状不匹配，{valid_y_true.shape} != {valid_y_pred.shape}"
         if not target_cols:
-            target_cols = [f"target_{i}" for i in range(y_true.shape[1])]
+            target_cols = [f"target_{i}" for i in range(valid_y_true.shape[1])]
 
         records = []
         for i, tgt in enumerate(target_cols):
-            yt = y_true[:, i]
-            yp = y_pred[:, i]
-            rel_err = np.abs(yt - yp) / (np.abs(yt) + self.eps)
+            t_yt = train_y_true[:, i]
+            t_yp = train_y_pred[:, i]
+            v_yt = valid_y_true[:, i]
+            v_yp = valid_y_pred[:, i]
+            v_rel_err = np.abs(v_yt - v_yp) / (np.abs(v_yt) + self.eps)
             records.append(
                 {
-                    "target": tgt,
-                    "RMSE": float(root_mean_squared_error(yt, yp)),
-                    "R2": float(r2_score(yt, yp)),
-                    "MARE": float(np.mean(rel_err)),
-                    "MAE": float(mean_absolute_error(yt, yp)),
+                    "Target": tgt,
+                    "Train_R2": round(r2_score(t_yt, t_yp), n_digits),
+                    "Valid_R2": round(r2_score(v_yt, v_yp), n_digits),
+                    "Valid_RMSE": round(root_mean_squared_error(v_yt, v_yp), n_digits),
+                    "Valid_MARE": round(np.mean(v_rel_err), n_digits),
+                    "Valid_MAE": round(mean_absolute_error(v_yt, v_yp), n_digits),
                 }
             )
         metrics_df = pd.DataFrame(records)
@@ -274,12 +414,14 @@ class RegressionEvaluator:
 
     def shap_summary_all_targets(
         self,
-        models: Union[BaseRegressor, Dict[str, BaseRegressor]],
-        X_val: Union[pd.DataFrame, np.ndarray],
+        regressors: Union[BaseRegressor, Dict[str, BaseRegressor]],
+        valid: Union[pd.DataFrame, np.ndarray],
         target_cols: List[str],
-        max_display: int = 15,
-        bg_sample: int = 100,
-        nsamples: int = 200,
+        max_display: int = MAX_DISPLAY,
+        bg_sample: int = BG_DEFAULT_SAMPLE,
+        nsamples: int = NSAMPLES_DEFAULT,
+        val_sample: int = VAL_DEFAULT_SAMPLE,
+        n_jobs: int = N_JOBS_DEFAULT,
     ):
         """
         SHAP 值总结，支持单模型多目标 和 多单目标模型
@@ -288,54 +430,57 @@ class RegressionEvaluator:
         - models: 单个模型对象(多目标) 或 {target_name: model} 字典 (多个单目标模型)
         -
         """
-        assert len(target_cols) >= 1, "targets 不能为空"
+        assert len(target_cols) >= 1, "target_cols 不能为空"
         X_val_df = (
-            X_val
-            if isinstance(X_val, pd.DataFrame)
-            else pd.DataFrame(X_val, columns=self.feature_cols)
+            valid
+            if isinstance(valid, pd.DataFrame)
+            else pd.DataFrame(valid, columns=self.feature_cols)
         )
-        if isinstance(models, dict):
-            shap_results = self._shap_multi_model_single_target(
-                models=models, X_val_df=X_val_df
-            )
-        else:
-            shap_results = self._shap_single_model_multi_target(
-                model=models,
-                X_val_df=X_val_df,
-                target_cols=target_cols,
-                bg_sample=min(bg_sample, len(X_val_df)),
-                nsamples=min(nsamples, len(X_val_df)),
-            )
+        shap_results = self._shap_compute_general(
+            regressors=regressors,
+            X_val_df=X_val_df,
+            bg_sample=bg_sample,
+            nsamples=nsamples,
+            val_sample=val_sample,
+            n_jobs=n_jobs,
+        )
         if self.output_dir:
             shap_dir = self._ensure_shap_dir()
-            self._plot_shap_subplots(shap_results, max_display, shap_dir)
+            self._plot_shap_explanation(shap_results, max_display, shap_dir)
             self._save_shap_to_excel(shap_results)
 
     def run_full_evaluation(
         self,
-        models: Union[BaseRegressor, Dict[str, BaseRegressor]],
-        X_val: Union[pd.DataFrame, np.ndarray],
-        y_true: Union[pd.DataFrame, np.ndarray],
+        regressors: Union[BaseRegressor, Dict[str, BaseRegressor]],
+        train: pd.DataFrame,
+        valid: pd.DataFrame,
         target_cols: List[str],
     ):
         """
         完成指标计算、真实值vs预测值分析、Shap 值特征重要性分析
         """
-        single_model = not isinstance(models, dict)
+        single_model = not isinstance(regressors, dict)
 
         if single_model:
-            assert isinstance(models, BaseRegressor), "models 参数不合法"
+            assert isinstance(regressors, BaseRegressor), "models 参数不合法"
             assert len(target_cols) == 1 or getattr(
-                models, "multi_target", False
+                regressors, "multi_target", False
             ), "该模型不支持多目标预测，但传入的目标变量个数大于1"
-            models_list = [models]
+            models_list = [regressors]
         else:
-            models_list = [models[tgt] for tgt in target_cols]
+            models_list = [regressors[tgt] for tgt in target_cols]
             assert len(models_list) == len(
                 target_cols
             ), "单变量回归模型需要模型个数与目标变量个数一致"
-
-        y_pred = [model.predict(X_val) for model in models_list]
-        self.compute_metrics(y_true, y_pred, target_cols)
-        self.plot_multi_target_diagnostics(y_true, y_pred, target_cols)
-        self.shap_summary_all_targets(models, X_val, target_cols)
+        train_y_true = train[target_cols]
+        train_y_pred = [model.predict(train) for model in models_list]
+        valid_y_true = valid[target_cols]
+        valid_y_pred = [model.predict(valid) for model in models_list]
+        # 指标
+        self.compute_metrics(
+            train_y_true, train_y_pred, valid_y_true, valid_y_pred, target_cols
+        )
+        # 诊断图
+        self.plot_multi_target_diagnostics(valid_y_true, valid_y_pred, target_cols)
+        # SHAP
+        self.shap_summary_all_targets(regressors, valid[self.feature_cols], target_cols)
