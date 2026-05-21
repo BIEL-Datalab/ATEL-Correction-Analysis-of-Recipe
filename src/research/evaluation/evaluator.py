@@ -11,7 +11,15 @@ import shap
 from typing import List, Optional, Union, Any, Dict, Tuple, Literal
 
 from src.models.base import BaseRegressor
-from src.constants.eval_constants import EPS, BG_DEFAULT_SAMPLE, NSAMPLES_DEFAULT, VAL_DEFAULT_SAMPLE, N_JOBS_DEFAULT, MAX_DISPLAY
+from src.constants.eval_constants import (
+    EPS,
+    BG_DEFAULT_SAMPLE,
+    NSAMPLES_DEFAULT,
+    VAL_DEFAULT_SAMPLE,
+    N_JOBS_DEFAULT,
+    MAX_DISPLAY,
+)
+
 
 class RegressionEvaluator:
     """
@@ -95,13 +103,13 @@ class RegressionEvaluator:
         n_samples = max(min_samples, len(X_val_df) // 3)
         n_samples = min(len(X_val_df), n_samples)
         return X_val_df.sample(n=n_samples, random_state=self.random_state)
-    
+
     def _is_tree_model(self, model):
         """
         判断是否为树模型
         """
         return isinstance(
-            model, (xgb.Booster, lgbm.Booster, catboost.CatBoost)
+            model, (xgb.Booster, lgbm.Booster, catboost.CatBoostRegressor)
         )
 
     def _shap_compute_general(
@@ -126,25 +134,27 @@ class RegressionEvaluator:
         if isinstance(regressors, dict):
             # 多个单目标树模型才以 dict 格式传入
             for regressor in regressors.values():
-                if not self._is_tree_model(regressor.model) and not regressor.multi_target:
+                if (
+                    not self._is_tree_model(regressor.model)
+                    and not regressor.multi_target
+                ):
                     raise ValueError(
                         "只有 XGB / LGBM / Catboost 支持多个单目标模型 shap 值计算"
                     )
+
             def compute_tree_shap(regressor: BaseRegressor):
                 explainer = shap.TreeExplainer(regressor.model)
                 sv = explainer.shap_values(X_sample)
                 if isinstance(sv, list):
                     sv = sv[0]
                 return sv
+
             shap_values_list = Parallel(n_jobs=n_jobs, backend="threading")(
                 delayed(compute_tree_shap)(regressor)
                 for regressor in regressors.values()
             )
             shap_results = {
-                tgt: {
-                    "shap_values": sv, 
-                    "X": X_sample
-                }
+                tgt: {"shap_values": sv, "X": X_sample}
                 for tgt, sv in zip(regressors.keys(), shap_values_list)
             }
             return shap_results
@@ -153,6 +163,7 @@ class RegressionEvaluator:
             target_cols = getattr(regressors, "target_cols", None)
             if target_cols is None:
                 raise ValueError("多目标模型必须提供 target_cols 属性")
+
             # 定义多目标模型预测函数
             def predict_func(X_np: np.ndarray) -> np.ndarray:
                 """
@@ -162,10 +173,9 @@ class RegressionEvaluator:
                 preds_df = regressors.model.predict(X_df)
                 pred_cols = [f"{t}_prediction" for t in target_cols]
                 return preds_df[pred_cols].values
-            
+
             bg_df = X_sample.sample(
-                min(bg_sample, len(X_sample)),
-                random_state=self.random_state
+                min(bg_sample, len(X_sample)), random_state=self.random_state
             )
             explainer = shap.KernelExplainer(
                 predict_func,
@@ -175,11 +185,15 @@ class RegressionEvaluator:
                 X_sample.values, nsamples=min(nsamples, len(X_sample))
             )
             if isinstance(shap_values, list):
-                shap_values = np.array(shap_values) # (n_targets, n_samples, n_features)
+                shap_values = np.array(
+                    shap_values
+                )  # (n_targets, n_samples, n_features)
                 shap_values = np.transpose(shap_values, (1, 2, 0))
             return {
                 tgt: {
-                    "shap_values": shap_values[:, :, i] if shap_values.ndim == 3 else shap_values,
+                    "shap_values": (
+                        shap_values[:, :, i] if shap_values.ndim == 3 else shap_values
+                    ),
                     "X": X_sample,
                 }
                 for i, tgt in enumerate(target_cols)

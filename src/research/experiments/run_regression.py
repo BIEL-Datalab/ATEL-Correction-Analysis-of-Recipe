@@ -55,6 +55,20 @@ def choose_model(args: argparse.Namespace) -> Tuple[BaseRegressor, bool]:
             ),
             True,
         )
+    elif args.model_type == "catboost":
+        return (
+            MODEL_REGISTRY[args.model_type](
+                num_cols=args.num_cols,
+                cat_cols=args.cat_cols,
+                iterations=args.num_boost_round,
+                early_stopping_rounds=args.early_stopping_rounds,
+                n_jobs=args.n_jobs,
+                n_trials=args.n_trials,
+                random_state=args.random_state,
+                use_gpu=False if args.acc == "cpu" else True,
+            ),
+            True,
+        )
     else:
         return (
             MODEL_REGISTRY[args.model_type](
@@ -226,7 +240,7 @@ def run_regression(args: argparse.Namespace) -> None:
             eval_dir = Path(args.model_dir) / f"{args.model_type}_{run_date}/eval"
         else:
             eval_dir = Path(args.model_dir) / "eval"
-        
+
         eval_dir.mkdir(parents=True, exist_ok=True)
         evaluator = RegressionEvaluator(
             num_cols=num_cols, cat_cols=cat_cols, output_dir=eval_dir
@@ -240,15 +254,17 @@ def run_regression(args: argparse.Namespace) -> None:
         for group_name, model in all_model.items():
             if args.mode == "train":
                 eval_dir = (
-                    Path(args.model_dir) / f"{args.model_type}_{run_date}/{group_name}/eval"
+                    Path(args.model_dir)
+                    / f"{args.model_type}_{run_date}/{group_name}/eval"
                 )
             else:
-                eval_dir = (
-                    Path(args.model_dir) / f"{group_name}/eval"
-                )
+                eval_dir = Path(args.model_dir) / f"{group_name}/eval"
             eval_dir.mkdir(parents=True, exist_ok=True)
             evaluator = RegressionEvaluator(
-                num_cols=num_cols, cat_cols=cat_cols, date_cols=model.date_feature_names,output_dir=eval_dir
+                num_cols=num_cols,
+                cat_cols=cat_cols,
+                date_cols=model.date_feature_names,
+                output_dir=eval_dir,
             )
             evaluator.run_full_evaluation(
                 regressors=model,

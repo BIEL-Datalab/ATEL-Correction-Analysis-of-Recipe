@@ -260,7 +260,7 @@ class LGBMRegressor(BaseRegressor):
                 "lambda_l2": trial.suggest_float("lambda_l2", 1e-2, 10.0, log=True),
                 "verbosity": -1,
                 "seed": self.random_state,
-                "num_threads": 1,
+                "num_threads": self.n_jobs,
             }
             pruning_cb = LightGBMPruningCallback(trial, metric="rmse")
             model = lgb.train(
@@ -288,7 +288,7 @@ class LGBMRegressor(BaseRegressor):
         study.optimize(
             objective,
             n_trials=self.n_trials,
-            n_jobs=self.n_jobs,
+            n_jobs=1,  # optuna 在并行上和 LGBM 有冲突
             show_progress_bar=True,
         )
         self.best_params = study.best_params | {

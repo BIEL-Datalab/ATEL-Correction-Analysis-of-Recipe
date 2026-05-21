@@ -3,6 +3,7 @@ import logging
 import warnings
 import json
 import pandas as pd
+import numpy as np
 import optuna
 import torch
 import omegaconf
@@ -11,11 +12,13 @@ import sys
 import os
 import collections
 from typing import List, Tuple, Dict, Any, Literal, Union, Optional
+from scipy.stats import uniform, randint, loguniform
 from pathlib import Path
 from contextlib import contextmanager
 from pytorch_tabular import TabularModel
 from pytorch_tabular.config import DataConfig, TrainerConfig, OptimizerConfig
 from pytorch_tabular.models import GANDALFConfig
+from pytorch_tabular.tabular_model_tuner import TabularModelTuner
 
 from src.models.base import BaseRegressor
 from src.constants.data_constants import (
@@ -31,7 +34,7 @@ from src.constants.train_constants import (
     TB_DEFAULT_MAX_EPOCHS,
     TB_DEFAULT_N_TRIALS,
     TB_N_JOBS,
-    TB_DEFAULT_NUM_WORKS
+    TB_DEFAULT_NUM_WORKS,
 )
 
 torch.set_float32_matmul_precision("medium")
@@ -54,6 +57,7 @@ torch.serialization.add_safe_globals(
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message="Seed set to.*")
+
 
 @contextmanager
 def suppress_output():
@@ -96,7 +100,7 @@ class GandalfRegressor(BaseRegressor):
         Args:
         -
         """
-        self.date_cols = date_cols
+        self.date_cols = date_cols or []
         self.date_feature_names = [d[0] for d in self.date_cols]
         self.continuous_cols = continuous_cols or self.DEFAULT_NUM_COLS
         self.categorical_cols = categorical_cols or self.DEFAULT_CAT_COLS
@@ -114,7 +118,11 @@ class GandalfRegressor(BaseRegressor):
         self.num_workers = num_workers or min(os.cpu_count() // 2, TB_DEFAULT_NUM_WORKS)
 
         # 结果相关
-        self.optimizer_config = OptimizerConfig(optimizer="AdamW")
+        self.optimizer_config = OptimizerConfig(
+            optimizer="AdamW",
+            lr_scheduler="StepLR",
+            lr_scheduler_params={"step_size": 20},
+        )
         self.model: TabularModel | None = None
         self.best_params: Dict[str, float] | None = None
         self.metrics: Dict[str, float] | None = None
@@ -230,13 +238,15 @@ class GandalfRegressor(BaseRegressor):
 
     def _build_configs(
         self,
-        params: Dict[str, Any],
+        params: Optional[Dict[str, Any]] = None,
         is_tuning: bool = True,
         check_point_dir: str = "checkpoint",
     ):
         """
         构建参数
         """
+        if not params:
+            params = {}
         use_gpu = torch.cuda.is_available() and self.acc == "gpu"
         self.acc == "gpu" if use_gpu else "cpu"
         data_config = DataConfig(
@@ -244,7 +254,7 @@ class GandalfRegressor(BaseRegressor):
             continuous_cols=self.continuous_cols,
             categorical_cols=self.categorical_cols,
             date_columns=self.date_cols,
-            num_workers=self.num_workers
+            num_workers=self.num_workers,
         )
         trainer_config = TrainerConfig(
             accelerator=self.acc,
@@ -270,9 +280,9 @@ class GandalfRegressor(BaseRegressor):
         model_config = GANDALFConfig(
             task="regression",
             learning_rate=params.get("learning_rate", 1e-3),
-            gflu_stages=params["gflu_stages"],
-            gflu_dropout=params["gflu_dropout"],
-            gflu_feature_init_sparsity=params["gflu_feature_init_sparsity"],
+            gflu_stages=params.get("gflu_stages", 6),
+            gflu_dropout=params.get("gflu_dropout", 0.1),
+            gflu_feature_init_sparsity=params.get("gflu_feature_init_sparsity", 0.3),
             batch_norm_continuous_input=not is_tuning,
             target_range=None,
             seed=self.random_state,

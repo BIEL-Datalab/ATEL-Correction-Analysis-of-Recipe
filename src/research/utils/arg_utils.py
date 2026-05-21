@@ -40,19 +40,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--date_cols",
         nargs="*",
         default=None,
-        help="Date columns in format: col:format:freq, e.g. hc_chamber_day:%Y-%m-%d:M",
+        help="Date columns in format: col:freq:format, e.g. hc_chamber_day:ME:%Y-%m-%d",
     )
     parser.add_argument("--other_info_cols", nargs="+", default=OTHER_INFO_COLS)
     parser.add_argument("--num_boost_round", type=int, default=None)
     parser.add_argument("--early_stopping_rounds", type=int, default=None)
     parser.add_argument("--test_size", type=float, default=TEST_SIZE)
     parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--random_state", type=int, default=None)
+    parser.add_argument("--random_state", type=int, default=42)
     parser.add_argument("--n_trials", type=int, default=None)
     parser.add_argument("--tgt_desc", type=bool, default=False)
-    parser.add_argument("-anomaly_export", type=bool, default=False)
+    parser.add_argument("--anomaly_export", type=bool, default=False)
     parser.add_argument("--n_jobs", type=int, default=1)
     parser.add_argument("--acc", type=str, default="gpu", choices=["gpu", "cpu"])
+    parser.add_argument(
+        "--tune_method", type=str, default="optuna", choices=["optuna", "tuner"]
+    )
     return parser
 
 
@@ -65,11 +68,11 @@ def parse_date_cols(date_args: List[str]) -> List[Tuple[str, str, str]]:
     date_cols = []
     for item in date_args:
         try:
-            col, fmt, freq = item.split(":")
+            col, freq, fmt = item.split(":")
         except ValueError:
             raise ValueError(
                 f"Invalid --date_cols format: {item}. "
-                f"Expected format: col:format:freq"
+                f"Expected format: col:freq:format"
             )
         date_cols.append((col, freq, fmt))
     return date_cols

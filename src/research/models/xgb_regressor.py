@@ -27,10 +27,6 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
 class XGBRegressor(BaseRegressor):
-    """
-    XGB 单目标回归封装类
-    """
-
     MISSING_TOKEN = "missing"
     DEFAULT_NUM_COLS = ACT_RATE_NM_SEC_COLS + RATE_COEF_COLS + BATCH_NUMBER_COLS
     DEFAULT_CAT_COLS = MACHINE_COLS
@@ -235,15 +231,15 @@ class XGBRegressor(BaseRegressor):
             raise TypeError(f"无法识别的输入类型: {type(X)}")
         return self.model.predict(X_mat)
 
-    def save_model(self, dir_path: Union[str, Path]):
+    def save_model(self, save_dir: Union[str, Path]):
         """
         保存模型和相关参数
         """
-        dir_path = Path(dir_path)
-        dir_path.mkdir(parents=True, exist_ok=True)
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
         target = self.target_cols[0]
         # 保存模型
-        model_path = dir_path / f"{target}.ubj"
+        model_path = save_dir / f"{target}.ubj"
         self.model.save_model(str(model_path))
         # 保存模型元信息
         meta = {
@@ -256,18 +252,18 @@ class XGBRegressor(BaseRegressor):
             "best_params": self.best_params,
             "random_state": self.random_state,
         }
-        meta_path = dir_path / f"{target}.json"
+        meta_path = save_dir / f"{target}.json"
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=4, ensure_ascii=False)
 
     @classmethod
-    def load_model(cls, dir_path: Union[str, Path], model_name: str):
+    def load_model(cls, model_dir: Union[str, Path], model_name: str):
         """
         加载类
         """
-        dir_path = Path(dir_path)
-        model_path = dir_path / f"{model_name}.ubj"
-        meta_path = dir_path / f"{model_name}.json"
+        model_dir = Path(model_dir)
+        model_path = model_dir / f"{model_name}.ubj"
+        meta_path = model_dir / f"{model_name}.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
         # 实例化
