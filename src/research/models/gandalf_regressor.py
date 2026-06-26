@@ -20,15 +20,15 @@ from pytorch_tabular.config import DataConfig, TrainerConfig, OptimizerConfig
 from pytorch_tabular.models import GANDALFConfig
 from pytorch_tabular.tabular_model_tuner import TabularModelTuner
 
-from src.models.base import BaseRegressor
-from src.constants.data_constants import (
+from src.research.models.base import BaseRegressor
+from src.research.constants.data_constants import (
     ACT_RATE_NM_SEC_COLS,
     RATE_COEF_COLS,
     BATCH_NUMBER_COLS,
     MACHINE_COLS,
     RAW_DATE_COLS,
 )
-from src.constants.train_constants import (
+from src.research.constants.train_constants import (
     RANDOM_STATE,
     TB_DEFAULT_BATCH_SIZE,
     TB_DEFAULT_MAX_EPOCHS,
