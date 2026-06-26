@@ -64,9 +64,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--anomaly_export", type=bool, default=False)
     parser.add_argument("--n_jobs", type=int, default=1)
     parser.add_argument("--acc", type=str, default="gpu", choices=["gpu", "cpu"])
-    parser.add_argument(
-        "--tune_method", type=str, default="optuna", choices=["optuna", "tuner"]
-    )
     return parser
 
 

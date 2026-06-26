@@ -63,7 +63,8 @@ class XGBRegressor(BaseRegressor):
         self.best_params: Dict[str, Any] | None = None
         self.model: xgb.Booster | None = None
         self.target_cols: List[str] | None = None
-        self.metrics: Dict[str, float] | None
+        # 未训练时 metrics 为 None，避免访问未初始化属性
+        self.metrics: Dict[str, float] | None = None
         # 训练类别映射
         self._cat_mappings: Dict[str, List[str]] = {}
 
@@ -275,7 +276,8 @@ class XGBRegressor(BaseRegressor):
         obj.feature_cols = meta["feature_cols"]
         obj._cat_mappings = meta.get("cat_mappings", {})
         obj.best_params = meta.get("best_params")
-        obj.target_cols = [meta.get("target_cols")]
+        # 保存时 target_cols 已为列表 [target]，加载时原样还原，保持单/多目标结构一致且 save/load 对称
+        obj.target_cols = meta.get("target_cols")
         obj.metrics = meta.get("metrics")
         # 加载模型
         obj.model = xgb.Booster()

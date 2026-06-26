@@ -18,7 +18,6 @@ from contextlib import contextmanager
 from pytorch_tabular import TabularModel
 from pytorch_tabular.config import DataConfig, TrainerConfig, OptimizerConfig
 from pytorch_tabular.models import GANDALFConfig
-from pytorch_tabular.tabular_model_tuner import TabularModelTuner
 
 from src.core.models.base import BaseRegressor
 from src.core.constants.data_constants import (

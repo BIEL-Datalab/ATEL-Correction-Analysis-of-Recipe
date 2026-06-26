@@ -67,7 +67,8 @@ class CatBoostRegressorModel(BaseRegressor):
         self.best_params: Dict[str, Any] | None = None
         self.model: CatBoostRegressor | None = None
         self.target_cols: List[str] | None = None
-        self.metrics: Dict[str, float] | None
+        # 未训练时 metrics 为 None，避免访问未初始化属性
+        self.metrics: Dict[str, float] | None = None
 
     def fit(
         self,

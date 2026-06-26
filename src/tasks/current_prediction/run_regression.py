@@ -29,6 +29,7 @@ from src.core.data.preprocess_and_split import preprocess_and_split
 from src.core.models.base import BaseRegressor
 from src.core.analysis.data_description import batch_plot_targets
 from src.core.evaluation.evaluator import RegressionEvaluator
+from src.core.analysis.anomaly_mining import export_prediction_anomalies
 
 pd.set_option("display.max_columns", None)
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
@@ -170,6 +171,7 @@ def train_or_load_multi_model(
             model, _ = choose_model(args)
             # 权重统一保存到 {run_root}/{group_name}/weights/best_model
             save_path = run_root / group_name / "weights"
+            # gandalf.fit 签名为 fit(train, valid, target_cols, check_point_dir)，此处传入 checkpoint 目录
             model.fit(train, valid, tgts, save_path / "checkpoint")
             model.save_model(save_path / "best_model")
             logging.info(
@@ -309,8 +311,23 @@ def run_regression(args: argparse.Namespace) -> None:
             )
             logging.info(f"目标分类 {group_name} 的模型结果已保存到 {eval_dir}")
 
-    # bad case 导出
-    # TODO
+    # bad case 导出：按误差排序取 Top K 异常样本，落盘到 outputs/analysis/anomaly_records/
+    if args.anomaly_export:
+        anomaly_dir = (
+            Path(args.result_dir)
+            / f"anomaly_records/{args.model_type}_abs_anomaly_top100_{run_date}"
+        )
+        anomaly_dir.mkdir(parents=True, exist_ok=True)
+        export_prediction_anomalies(
+            models=all_model,
+            train=train,
+            valid=valid,
+            feature_cols=num_cols + cat_cols,
+            target_cols=all_targets,
+            output_dir=anomaly_dir,
+            error_type="abs",
+        )
+        logging.info(f"预测异常样本已保存到 {anomaly_dir}")
 
 
 if __name__ == "__main__":
