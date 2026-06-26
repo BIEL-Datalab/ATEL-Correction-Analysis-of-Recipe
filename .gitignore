@@ -12,3 +12,6 @@ venv/
 
 outputs/
 logs/
+
+# 原始数据不纳入版本控制
+raw_data/
