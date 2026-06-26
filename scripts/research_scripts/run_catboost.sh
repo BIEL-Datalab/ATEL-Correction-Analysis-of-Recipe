@@ -4,8 +4,8 @@ set -e
 echo "===== RUN CatBoost REGRESSION ====="
 
 DATA_PATH="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/raw_data/df_filtered_outlier.csv"
-MODEL_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/models_result/catboost"
-RESULT_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/results"
+MODEL_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/outputs/models/catboost"
+RESULT_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/outputs/analysis"
 LOG_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/logs/catboost"
 
 python -m src.tasks.current_prediction.run_regression \

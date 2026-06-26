@@ -1,8 +1,14 @@
 import argparse
+from pathlib import Path
 from typing import List, Tuple
 from src.core.models.registry import MODEL_REGISTRY
-from src.core.constants.data_constants import *
-from src.core.constants.train_constants import *
+from src.core.constants.data_constants import OTHER_INFO_COLS
+from src.core.constants.train_constants import TEST_SIZE
+
+# 输出根目录默认值：权重与测评统一收口到 outputs/models，分析报告图表收口到 outputs/analysis
+DEFAULT_OUTPUT_ROOT = "outputs"
+DEFAULT_MODEL_DIR = str(Path(DEFAULT_OUTPUT_ROOT) / "models")
+DEFAULT_RESULT_DIR = str(Path(DEFAULT_OUTPUT_ROOT) / "analysis")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -23,14 +29,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model_dir",
         type=str,
-        required=True,
+        default=DEFAULT_MODEL_DIR,
         help="""
-            Directory path for model. 
-            If mode = train, trained model and metadata will be saved here. 
-            If mode = predict, model will be loaded from this directory.
+            模型权重与测评根目录（默认 outputs/models）。
+            train 模式下，权重与测评结果保存到 {model_dir}/{model_type}/{model_type}_{date}/；
+            eval 模式下，从该结构加载模型。
         """,
     )
-    parser.add_argument("--result_dir", type=str, required=True, help="")
+    parser.add_argument(
+        "--result_dir",
+        type=str,
+        default=DEFAULT_RESULT_DIR,
+        help="分析报告图表根目录（默认 outputs/analysis），如目标变量分析、异常记录等。",
+    )
     parser.add_argument("--log_dir", type=str, default=None)
     # 可选参数
     parser.add_argument("--target_cols", nargs="+", default=None)

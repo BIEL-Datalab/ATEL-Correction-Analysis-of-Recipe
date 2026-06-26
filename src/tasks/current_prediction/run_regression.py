@@ -97,6 +97,21 @@ def prepare_target_groups(args: argparse.Namespace) -> Dict[str, List[str]]:
     return TARGET_GROUPS
 
 
+def _latest_run_dir(model_root: Path) -> Path:
+    """
+    在模型根目录下定位最近一次运行目录（命名形如 {model_type}_{date}）。
+    eval 模式下用于加载最新训练产物；不存在时回退到根目录本身以保留原有行为。
+    """
+    model_root = Path(model_root)
+    if not model_root.exists():
+        return model_root
+    run_dirs = sorted(
+        [p for p in model_root.iterdir() if p.is_dir()],
+        key=lambda p: p.name,
+    )
+    return run_dirs[-1] if run_dirs else model_root
+
+
 def train_or_load_tree_models(
     args: argparse.Namespace,
     train: pd.DataFrame,
@@ -108,7 +123,9 @@ def train_or_load_tree_models(
     训练/加载树模型
     """
     all_models = {}
-    model_dir = Path(args.model_dir)
+    # 模型根目录：outputs/models/{model_type}，每次运行按日期归档
+    model_root = Path(args.model_dir) / args.model_type
+    run_root = model_root / f"{args.model_type}_{run_date}"
     for group_name, tgts in target_groups.items():
         logging.info(
             f"训练 {args.model_type} 模型"
@@ -120,12 +137,13 @@ def train_or_load_tree_models(
             if args.mode == "train":
                 model, _ = choose_model(args)
                 model.fit(train, valid, [tgt])
-                save_path = model_dir / f"{args.model_type}_{run_date}/models"
+                # 单目标树模型权重统一保存到 weights/ 子目录
+                save_path = run_root / "weights"
                 model.save_model(save_path)
             else:
-                # 加载模型目录下需要以目标变量名作为加载模型的代码路径
+                # eval 模式：从 model_root 下最新运行目录的 weights/ 加载
                 modelcls = MODEL_REGISTRY[args.model_type]
-                model = modelcls.load_model(model_dir, tgt)
+                model = modelcls.load_model(_latest_run_dir(model_root) / "weights", tgt)
             all_models[tgt] = model
             logging.info(
                 f"目标变量 {tgt} 模型已保存在路径 {save_path} 下"
@@ -143,14 +161,15 @@ def train_or_load_multi_model(
     run_date: str,
 ) -> Dict[str, BaseRegressor]:
     all_models = {}
-    model_dir = Path(args.model_dir)
+    # 多目标模型根目录：outputs/models/{model_type}，按日期与目标分组归档
+    model_root = Path(args.model_dir) / args.model_type
+    run_root = model_root / f"{args.model_type}_{run_date}"
     for group_name, tgts in target_groups.items():
         if args.mode == "train":
             logging.info(f"训练 {args.model_type} 模型")
             model, _ = choose_model(args)
-            save_path = (
-                model_dir / f"{args.model_type}_{run_date}" / group_name / "model"
-            )
+            # 权重统一保存到 {run_root}/{group_name}/weights/best_model
+            save_path = run_root / group_name / "weights"
             model.fit(train, valid, tgts, save_path / "checkpoint")
             model.save_model(save_path / "best_model")
             logging.info(
@@ -158,8 +177,11 @@ def train_or_load_multi_model(
             )
         else:
             logging.info(f"加载 {args.model_type} 模型")
+            # eval 模式：从最新运行目录的对应分组 weights/ 加载
             modelcls = MODEL_REGISTRY[args.model_type]
-            model = modelcls.load_model(model_dir / group_name / "model/best_model")
+            model = modelcls.load_model(
+                _latest_run_dir(model_root) / group_name / "weights/best_model"
+            )
         all_models[group_name] = model
     return all_models
 
@@ -212,8 +234,9 @@ def run_regression(args: argparse.Namespace) -> None:
     )
     # 目标变量分析
     if args.tgt_desc:
+        # 分析报告图表统一收口到 outputs/analysis
         desc_path = (
-            args.result_dir / f"target_analysis/target_desc/target_desc_{run_date}"
+            Path(args.result_dir) / f"target_analysis/target_desc/target_desc_{run_date}"
         )
         batch_plot_targets(
             df=df,
@@ -235,11 +258,16 @@ def run_regression(args: argparse.Namespace) -> None:
         )
     # 模型测评
     if is_tree:
-        # 树模型下所有目标变量一起做测评
+        # 树模型下所有目标变量一起做测评；测评结果与权重同属一次运行目录
         if args.mode == "train":
-            eval_dir = Path(args.model_dir) / f"{args.model_type}_{run_date}/eval"
+            eval_dir = (
+                Path(args.model_dir)
+                / args.model_type
+                / f"{args.model_type}_{run_date}"
+                / "eval"
+            )
         else:
-            eval_dir = Path(args.model_dir) / "eval"
+            eval_dir = _latest_run_dir(Path(args.model_dir) / args.model_type) / "eval"
 
         eval_dir.mkdir(parents=True, exist_ok=True)
         evaluator = RegressionEvaluator(
@@ -255,10 +283,17 @@ def run_regression(args: argparse.Namespace) -> None:
             if args.mode == "train":
                 eval_dir = (
                     Path(args.model_dir)
-                    / f"{args.model_type}_{run_date}/{group_name}/eval"
+                    / args.model_type
+                    / f"{args.model_type}_{run_date}"
+                    / group_name
+                    / "eval"
                 )
             else:
-                eval_dir = Path(args.model_dir) / f"{group_name}/eval"
+                eval_dir = (
+                    _latest_run_dir(Path(args.model_dir) / args.model_type)
+                    / group_name
+                    / "eval"
+                )
             eval_dir.mkdir(parents=True, exist_ok=True)
             evaluator = RegressionEvaluator(
                 num_cols=num_cols,
