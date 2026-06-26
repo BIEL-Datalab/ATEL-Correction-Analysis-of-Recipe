@@ -8,14 +8,14 @@ from pathlib import Path
 from optuna.integration import XGBoostPruningCallback
 from sklearn.metrics import root_mean_squared_error, r2_score
 from typing import List, Tuple, Dict, Union, Any, Optional
-from src.models.base import BaseRegressor
-from src.constants.data_constants import (
+from src.core.models.base import BaseRegressor
+from src.core.constants.data_constants import (
     ACT_RATE_NM_SEC_COLS,
     RATE_COEF_COLS,
     BATCH_NUMBER_COLS,
     MACHINE_COLS,
 )
-from src.constants.train_constants import (
+from src.core.constants.train_constants import (
     RANDOM_STATE,
     TREE_DEFAULT_NUM_BOOST_ROUND,
     TREE_DEFAULT_EARLY_STOPPING_ROUND,

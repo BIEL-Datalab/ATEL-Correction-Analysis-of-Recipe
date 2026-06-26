@@ -10,8 +10,8 @@ from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_err
 import shap
 from typing import List, Optional, Union, Any, Dict, Tuple, Literal
 
-from src.models.base import BaseRegressor
-from src.constants.eval_constants import (
+from src.core.models.base import BaseRegressor
+from src.core.constants.eval_constants import (
     EPS,
     BG_DEFAULT_SAMPLE,
     NSAMPLES_DEFAULT,

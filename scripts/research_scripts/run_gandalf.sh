@@ -8,7 +8,7 @@ MODEL_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/models_res
 RESULT_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/results"
 LOG_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/logs/gandalf"
 
-python -m src.experiments.run_regression \
+python -m src.tasks.current_prediction.run_regression \
   --model_type gandalf \
   --mode train \
   --date_cols hc_chamber_day:ME:%Y-%m-%d \

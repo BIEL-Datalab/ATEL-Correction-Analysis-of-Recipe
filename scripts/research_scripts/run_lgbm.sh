@@ -8,7 +8,7 @@ MODEL_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/models_res
 RESULT_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/results/lgbm_eval"
 LOG_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/logs/260210"
 
-python -m src.experiments.run_regression \
+python -m src.tasks.current_prediction.run_regression \
   --model_type lgbm \
   --mode train \
   --raw_data_path "${DATA_PATH}" \

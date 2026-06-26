@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Union, Dict, List, Literal
-from src.research.models.base import BaseRegressor
+from src.core.models.base import BaseRegressor
 
 
 def export_prediction_anomalies(

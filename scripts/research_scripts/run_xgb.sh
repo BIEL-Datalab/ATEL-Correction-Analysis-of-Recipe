@@ -8,7 +8,7 @@ MODEL_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/models_res
 RESULT_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/results"
 LOG_DIR="/home_ext/zzx/work_file/ATEL-Correction-Analysis-of-Recipe/logs/xgb"
 
-python -m src.experiments.run_regression \
+python -m src.tasks.current_prediction.run_regression \
   --model_type xgb \
   --mode train \
   --raw_data_path "${DATA_PATH}" \

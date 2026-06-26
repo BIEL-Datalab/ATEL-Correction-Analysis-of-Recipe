@@ -1,8 +1,8 @@
 import argparse
 from typing import List, Tuple
-from src.models.registry import MODEL_REGISTRY
-from src.constants.data_constants import *
-from src.constants.train_constants import *
+from src.core.models.registry import MODEL_REGISTRY
+from src.core.constants.data_constants import *
+from src.core.constants.train_constants import *
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
