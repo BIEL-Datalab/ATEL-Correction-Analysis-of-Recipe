@@ -127,15 +127,32 @@ PRODUCT_SPEC_COLS: List[str] = [
     "l_length", "width", "area", "floor_number", "inside_code", "pcs_qty",
 ]
 # 维保相关
+# service_type：保养类型，缺失表示数据起点未记录上次保养信息（集中在 time_index 较小段），
+#               预处理时填充为独立类别 unknown；service_order 保持数值让模型自学非线性
 MAINTENANCE_COLS: List[str] = [
     "service_type", "service_order", "malfunction_type_code",
 ]
-# ftu 配置：ftu_operation=0 时 ftu_type 为空，二者构成组合分类变量
+# service_type 缺失填充值（区别于真实"无保养"，本数据为起点未记录）
+SERVICE_TYPE_MISSING_FILL = "unknown"
+
+# ftu 配置：ftu_operation=0 时 ftu_type 为空，二者业务强相关，组合后作为单个分类变量处理
 FTU_COLS: List[str] = ["ftu_operation", "ftu_type"]
-# 集中性检验与检测机台：与颜色指标关联，初版可不入模型，保留供后续分析
+# ftu 组合派生列：形如 "0_none" / "1_Ar" / "1_O2"，作为一个分类特征
+FTU_COMBO_COL: str = "ftu_combo"
+
+# 集中性检验与检测机台：与颜色指标关联
+# pass_status：集中性检验是否通过；fail_detail：不通过原因详情
+# 预处理逻辑：fail_detail!="无" 时 pass_status 必为 fail（修正误标），并派生条件触发特征
 INSPECTION_COLS: List[str] = [
     "pass_status", "fail_detail", "color_station", "tr_station",
 ]
+# fail_detail 派生的两个二值特征：是否触发条件1 / 是否触发条件2
+# 文本含"条件1满足"表示触发条件1，含"条件2满足"表示触发条件2；当前数据两者同时触发，
+# 拆成两个独立二值特征便于未来单条件触发场景
+COND1_TRIGGERED_COL: str = "cond1_triggered"
+COND2_TRIGGERED_COL: str = "cond2_triggered"
+# fail_detail 中表示通过（无异常）的取值
+FAIL_DETAIL_PASS_TOKEN = "无"
 # 上游来料质量：平坦度 / 厚度 各 6 统计量，共 12 列
 INCOMING_QUALITY_COLS: List[str] = [
     f"incoming_{prop}_{stat}"
@@ -200,13 +217,16 @@ FEATURE_GROUPS: Dict[str, List[str]] = {
 }
 
 # 分类特征：机器、楼层、产品代码、维保类型、ftu 组合、故障代码、检测机台等
+# 注：ftu 用组合派生列 ftu_combo（而非 ftu_operation/ftu_type 两列）；fail_detail 派生
+#     cond1/cond2_triggered 后不再作为原始分类特征入模型（文本细节无意义）
 CAT_FEATURE_COLS: List[str] = [
     MACHINE_COL,
     "floor_number", "inside_code",
     "service_type", "malfunction_type_code",
-    "ftu_operation", "ftu_type",
+    FTU_COMBO_COL,
     "pass_status", "color_station", "tr_station",
     BATCH_LOG_TAG_COL,
+    COND1_TRIGGERED_COL, COND2_TRIGGERED_COL,
 ]
 
 # 数值特征：所有 FEATURE_GROUPS 展平
@@ -232,16 +252,35 @@ def _all_defined_cols() -> List[str]:
     return unique
 
 
+# 派生列：不在原始数据中，由原始列经预处理生成，双向校验时需排除
+DERIVED_COLS: List[str] = [
+    FTU_COMBO_COL, COND1_TRIGGERED_COL, COND2_TRIGGERED_COL,
+    *DATE_FEATURE_COLS,  # year/month/quarter 由 hc_chamber_day 派生
+]
+# 派生列到其原始依赖列的映射（用于校验派生列的依赖列是否存在于真实数据）
+DERIVED_COL_SOURCES: Dict[str, List[str]] = {
+    FTU_COMBO_COL: FTU_COLS,
+    COND1_TRIGGERED_COL: ["fail_detail"],
+    COND2_TRIGGERED_COL: ["fail_detail"],
+    "year": [HC_CHAMBER_DAY_COL],
+    "month": [HC_CHAMBER_DAY_COL],
+    "quarter": [HC_CHAMBER_DAY_COL],
+}
+
+
 def validate_columns(available_cols) -> Dict[str, List[str]]:
     """
-    双向验证：本文件定义的列名是否都在真实数据中。
+    双向验证：本文件定义的列名是否都在真实数据中（派生列除外）。
+
+    派生列（ftu_combo / cond1_triggered / cond2_triggered / year / month / quarter）
+    不在原始数据中，由预处理生成，校验时改为检查其依赖的原始列是否存在。
 
     Args:
         available_cols: 真实数据列名集合或列表
 
     Returns:
         dict[group_name -> 缺失列名列表]；若某组无缺失则不出现在结果中。
-        空字典表示所有定义列均存在于真实数据中。
+        空字典表示所有定义列均存在于真实数据中（派生列检查其依赖列）。
     """
     available = set(available_cols)
     checks = {
@@ -254,15 +293,17 @@ def validate_columns(available_cols) -> Dict[str, List[str]]:
         "Y_TRANS_COLS": Y_TRANS_COLS,
         "CONTEXT_COLS": CONTEXT_COLS,
         "IDENTIFIER_COLS": IDENTIFIER_COLS,
-        "CAT_FEATURE_COLS": CAT_FEATURE_COLS,
         "O2_COLS": O2_COLS,
         "AR_COLS": AR_COLS,
     }
     missing: Dict[str, List[str]] = {}
     for name, cols in checks.items():
-        miss = [c for c in cols if c not in available]
+        # 派生列改为检查其依赖列
+        check_cols = [DERIVED_COL_SOURCES.get(c, [c]) for c in cols]
+        check_cols = [c for sub in check_cols for c in sub]
+        miss = [c for c in check_cols if c not in available]
         if miss:
-            missing[name] = miss
+            missing[name] = list(dict.fromkeys(miss))
     return missing
 
 

@@ -125,14 +125,25 @@ def preprocess_and_split(
     if consistency["unused"]:
         logger.info(f"真实数据中未使用的列: {consistency['unused']}")
 
-    # 需要加载的列：特征 + 目标 + 标识/时间 + 时间派生依赖的 hc_chamber_day
-    from src.core.constants.data_constants import IDENTIFIER_COLS
+    # 需要加载的列：特征 + 目标 + 标识/时间 + 时间派生依赖的 hc_chamber_day + ftu/fail_detail 原始列
+    # 派生列（ftu_combo/cond*_triggered/year/month/quarter）不在原始数据中，加载其依赖的原始列
+    from src.core.constants.data_constants import (
+        IDENTIFIER_COLS, DERIVED_COLS, DERIVED_COL_SOURCES,
+        FTU_COLS,
+    )
+    # 派生列依赖的原始列也要加载
+    derived_source_cols = []
+    for dcol in DERIVED_COLS:
+        derived_source_cols.extend(DERIVED_COL_SOURCES.get(dcol, []))
     load_cols = list(
         dict.fromkeys(
-            num_cols + cat_cols + target_cols + IDENTIFIER_COLS + [HC_CHAMBER_DAY_COL]
+            num_cols + cat_cols + target_cols + IDENTIFIER_COLS
+            + [HC_CHAMBER_DAY_COL] + FTU_COLS + ["fail_detail"] + derived_source_cols
         )
     )
-    load_cols = [c for c in load_cols if c in all_cols]
+    # 去掉派生列本身（它们不在原始数据中，加载时不存在）
+    from src.core.constants.data_constants import DERIVED_COLS as _DC
+    load_cols = [c for c in load_cols if c not in _DC and c in all_cols]
     df = pd.read_parquet(raw_data_path, columns=load_cols)
     logger.info(f"读取原始数据: {df.shape}")
 
@@ -142,9 +153,14 @@ def preprocess_and_split(
         df, num_cols, cat_cols, target_cols, date_feature_cols=DATE_FEATURE_COLS
     )
 
-    # 3. 清洗
+    # 3. 清洗（cathode 离群置空、丢弃 Y 全缺/越界）
     cleaned_df, cleaning_report = clean_raw_data(df)
     logger.info(f"清洗完成:\n{cleaning_report.summary()}")
+
+    # 3.1 特征工程：ftu 组合、service_type 填充、pass_status 修正与条件触发派生
+    from src.core.data.feature_engineering import engineer_features
+    cleaned_df = engineer_features(cleaned_df)
+    logger.info("特征工程完成: ftu_combo / service_type 填充 / pass_status 修正 / cond 触发派生")
 
     # 4. 固定测试集（在全量清洗数据上取最后 test_ratio）
     rest_df, test_df, test_report = holdout_test_set(cleaned_df, test_ratio=test_ratio)
@@ -164,6 +180,7 @@ def preprocess_and_split(
     logger.info(f"训练/验证切分:\n{tv_report.summary()}")
 
     # 7. 汇总 meta
+    from src.core.constants.data_constants import DERIVED_COLS
     meta = {
         "raw_data_path": str(raw_data_path),
         "run_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -185,6 +202,7 @@ def preprocess_and_split(
         "cat_cols": cat_cols,
         "target_cols": target_cols,
         "date_feature_cols": DATE_FEATURE_COLS,
+        "derived_cols": DERIVED_COLS,
     }
 
     # 8. 落盘
