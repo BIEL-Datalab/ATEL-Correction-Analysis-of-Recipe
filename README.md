@@ -15,7 +15,7 @@ Recipe 的相关性分析及自动调参。
 
 - `src/core/`：共享基础设施（constants / data / models / evaluation / analysis / utils）
 - `src/tasks/`：按业务阶段划分的任务入口（current_prediction / forecasting / param_correction）
-- `scripts/research_scripts/`：各模型训练运行脚本
+- `scripts/`：各模型训练运行脚本（run_{xgb,lgbm,catboost,gandalf}.sh）
 - `outputs/`：输出结果（`analysis/` 分析图表、`models/` 权重与测评、`old/` 历史归档）
 - `raw_data/`：原始数据（不纳入版本控制）
 
@@ -28,7 +28,7 @@ Recipe 的相关性分析及自动调参。
 pip install -r requirements.txt
 
 # 运行某模型训练与测评（需使用项目对应 Python 环境）
-bash scripts/research_scripts/run_xgb.sh
+bash scripts/run_xgb.sh
 ```
 
 模型权重与测评默认输出到 `outputs/models/{model_type}/`，分析报告输出到 `outputs/analysis/`。

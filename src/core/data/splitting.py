@@ -243,6 +243,15 @@ def split_random(
     return train_df, valid_df, test_df, report
 
 
+def _check_ratios(train_ratio: float, valid_ratio: float, test_ratio: float) -> None:
+    """校验三份比例之和为 1.0（允许浮点误差）。"""
+    total = train_ratio + valid_ratio + test_ratio
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(
+            f"切分比例之和必须为 1.0，当前 train+valid+test = {total}"
+        )
+
+
 def _sort_by_date(df: pd.DataFrame, sort_col: str) -> pd.DataFrame:
     """按日期列排序，缺失日期排到最后。sort_col 为日期列（默认 hc_chamber_day）。"""
     if sort_col not in df.columns:
@@ -252,15 +261,6 @@ def _sort_by_date(df: pd.DataFrame, sort_col: str) -> pd.DataFrame:
     return df.assign(_sort_key=sort_key).sort_values(
         "_sort_key", kind="mergesort", na_position="last"
     ).drop(columns="_sort_key")
-
-
-def _check_ratios(train_ratio: float, valid_ratio: float, test_ratio: float) -> None:
-    """校验三份比例之和为 1.0（允许浮点误差）。"""
-    total = train_ratio + valid_ratio + test_ratio
-    if abs(total - 1.0) > 1e-6:
-        raise ValueError(
-            f"切分比例之和必须为 1.0，当前 train+valid+test = {total}"
-        )
 
 
 def _fill_time_ranges(

@@ -163,21 +163,28 @@ def preprocess_and_split(
     logger.info("特征工程完成: ftu_combo / service_type 填充 / pass_status 修正 / cond 触发派生")
 
     # 4. 固定测试集（在全量清洗数据上取最后 test_ratio）
-    rest_df, test_df, test_report = holdout_test_set(cleaned_df, test_ratio=test_ratio)
-    logger.info(f"测试集固定:\n{test_report.summary()}")
+    rest_df, test_df, _ = holdout_test_set(cleaned_df, test_ratio=test_ratio)
 
     # 5. 测试集前数据按日期筛选训练起点（可选）
+    date_filter_str = ""
     if date_filter_start is not None or date_filter_end is not None:
         rest_df, filter_report = filter_by_date_range(
             rest_df, start=date_filter_start, end=date_filter_end
         )
-        logger.info(f"日期筛选:\n{filter_report.summary()}")
+        date_filter_str = filter_report.date_filter
 
     # 6. 训练/验证切分
     train_df, valid_df, tv_report = split_train_valid(
         rest_df, train_ratio=train_ratio_in_rest
     )
-    logger.info(f"训练/验证切分:\n{tv_report.summary()}")
+    # 合并测试集信息到同一份切分报告（test_split 与 train_valid_split 互补，
+    # 合并后 train/valid/test 三类信息集中在 split_report，避免互相错开的两份报告）
+    split_report = tv_report
+    split_report.n_test = len(test_df)
+    split_report.date_filter = date_filter_str
+    split_report.n_before_date_filter = len(cleaned_df) - len(test_df)
+    _fill_test_ranges(split_report, test_df)
+    logger.info(f"数据切分完成:\n{split_report.summary()}")
 
     # 7. 汇总 meta
     from src.core.constants.data_constants import DERIVED_COLS
@@ -196,8 +203,7 @@ def preprocess_and_split(
         "date_filter": {"start": date_filter_start, "end": date_filter_end},
         "column_consistency": consistency,
         "cleaning": asdict(cleaning_report),
-        "test_split": _report_to_dict(test_report),
-        "train_valid_split": _report_to_dict(tv_report),
+        "split_report": _report_to_dict(split_report),
         "num_cols": num_cols,
         "cat_cols": cat_cols,
         "target_cols": target_cols,
@@ -215,6 +221,21 @@ def preprocess_and_split(
 def _report_to_dict(report: SplitReport) -> dict:
     """SplitReport 转可序列化 dict。"""
     return asdict(report)
+
+
+def _fill_test_ranges(report: SplitReport, test_df: pd.DataFrame) -> None:
+    """填充测试集的时间范围到切分报告（测试集由 holdout_test_set 产出，无独立报告）。"""
+    from src.core.constants.data_constants import HC_CHAMBER_DAY_COL, TIME_INDEX_COL
+    if test_df.empty:
+        return
+    if HC_CHAMBER_DAY_COL in test_df.columns:
+        dates = pd.to_datetime(test_df[HC_CHAMBER_DAY_COL], errors="coerce").dropna()
+        if not dates.empty:
+            report.test_time_range = f"{dates.min().date()} ~ {dates.max().date()}"
+    if TIME_INDEX_COL in test_df.columns:
+        ti = test_df[TIME_INDEX_COL].dropna()
+        if not ti.empty:
+            report.test_time_index_range = f"{int(ti.min())} ~ {int(ti.max())}"
 
 
 def _save_outputs(
