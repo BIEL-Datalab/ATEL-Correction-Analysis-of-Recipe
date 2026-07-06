@@ -1,39 +1,45 @@
+"""
+GANDALF 多目标回归模型（基于 pytorch_tabular）
+
+设计要点：
+  - 多目标：一次拟合多个 target（GANDALF 原生支持多输出）。
+  - 特征列由调用层注入（num/cat/date），不再硬编码常量。
+  - 缺失/未知类别：pytorch_tabular 对分类列自动 embedding，缺失作为独立类别；
+    数值缺失由模型自行处理。
+  - optuna 搜索 + Lightning Trainer 早停 + 最优参数重训。
+  - 损失：GANDALFConfig.loss，默认 MSE；多目标场景下统一用 MSE，分位损失暂不在此模型
+    启用（多目标分位损失需自定义 loss，留待 TabM 路线统一实现）。
+"""
+
 import gc
-import logging
-import warnings
 import json
-import pandas as pd
+import logging
+import os
+import sys
+import typing
+import warnings
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+
 import numpy as np
 import optuna
+import pandas as pd
 import torch
 import omegaconf
-import typing
-import sys
-import os
 import collections
-from typing import List, Tuple, Dict, Any, Literal, Union, Optional
-from scipy.stats import uniform, randint, loguniform
-from pathlib import Path
-from contextlib import contextmanager
 from pytorch_tabular import TabularModel
-from pytorch_tabular.config import DataConfig, TrainerConfig, OptimizerConfig
+from pytorch_tabular.config import DataConfig, OptimizerConfig, TrainerConfig
 from pytorch_tabular.models import GANDALFConfig
 
 from src.core.models.base import BaseRegressor
-from src.core.constants.data_constants import (
-    ACT_RATE_NM_SEC_COLS,
-    RATE_COEF_COLS,
-    BATCH_NUMBER_COLS,
-    MACHINE_COLS,
-    RAW_DATE_COLS,
-)
 from src.core.constants.train_constants import (
     RANDOM_STATE,
     TB_DEFAULT_BATCH_SIZE,
     TB_DEFAULT_MAX_EPOCHS,
     TB_DEFAULT_N_TRIALS,
-    TB_N_JOBS,
     TB_DEFAULT_NUM_WORKS,
+    TB_N_JOBS,
 )
 
 torch.set_float32_matmul_precision("medium")
@@ -60,30 +66,23 @@ warnings.filterwarnings("ignore", message="Seed set to.*")
 
 @contextmanager
 def suppress_output():
-    """
-    同时抑制 stdout 和 stderr 的上下文管理器
-    """
+    """同时抑制 stdout 和 stderr，用于 optuna 搜索阶段屏蔽 pytorch_tabular 冗长日志。"""
     with open(os.devnull, "w") as devnull:
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        sys.stdout = devnull
-        sys.stderr = devnull
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = devnull, devnull
         try:
             yield
         finally:
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
+            sys.stdout, sys.stderr = old_stdout, old_stderr
 
 
 class GandalfRegressor(BaseRegressor):
-
-    DEFAULT_NUM_COLS = ACT_RATE_NM_SEC_COLS + RATE_COEF_COLS + BATCH_NUMBER_COLS
-    DEFAULT_CAT_COLS = MACHINE_COLS
+    """基于 pytorch_tabular GANDALF 的多目标回归模型封装。"""
 
     def __init__(
         self,
-        continuous_cols: Optional[List[str]] = None,
-        categorical_cols: Optional[List[str]] = None,
+        num_cols: Optional[List[str]] = None,
+        cat_cols: Optional[List[str]] = None,
         date_cols: Optional[List[Tuple[str, str, str]]] = None,
         batch_size: Optional[int] = None,
         max_epochs: Optional[int] = None,
@@ -94,38 +93,40 @@ class GandalfRegressor(BaseRegressor):
         num_workers: Optional[int] = None,
     ):
         """
-        初始化模型
-
         Args:
-        -
+            num_cols / cat_cols: 数值/分类特征列
+            date_cols: pytorch_tabular 格式 [(col, freq, fmt)]，深度模型需要时传入
+            batch_size / max_epochs: 训练批大小与最大轮数
+            n_trials: optuna 试验数（通路测试传小值）
+            n_jobs: 并行数
+            acc: 'gpu' 或 'cpu'，无 CUDA 时自动降级 cpu
+            num_workers: DataLoader 工作进程数
         """
-        self.date_cols = date_cols or []
-        self.date_feature_names = [d[0] for d in self.date_cols]
-        self.continuous_cols = continuous_cols or self.DEFAULT_NUM_COLS
-        self.categorical_cols = categorical_cols or self.DEFAULT_CAT_COLS
-        feature_cols = (
-            self.categorical_cols + self.continuous_cols + self.date_feature_names
+        random_state = random_state if random_state is not None else RANDOM_STATE
+        super().__init__(
+            num_cols=num_cols,
+            cat_cols=cat_cols,
+            date_cols=[d[0] for d in (date_cols or [])],
+            random_state=random_state,
+            multi_target=True,
         )
-        random_state = random_state or RANDOM_STATE
-        super().__init__(feature_cols, random_state, multi_target=True)
-
+        self._date_cols_pt = date_cols or []
         self.batch_size = batch_size or TB_DEFAULT_BATCH_SIZE
         self.max_epochs = max_epochs or TB_DEFAULT_MAX_EPOCHS
         self.n_trials = n_trials or TB_DEFAULT_N_TRIALS
         self.n_jobs = n_jobs or TB_N_JOBS
         self.acc = "gpu" if acc == "gpu" and torch.cuda.is_available() else "cpu"
-        self.num_workers = num_workers or min(os.cpu_count() // 2, TB_DEFAULT_NUM_WORKS)
-
-        # 结果相关
+        self.num_workers = num_workers or min(
+            os.cpu_count() // 2 if os.cpu_count() else 1, TB_DEFAULT_NUM_WORKS
+        )
         self.optimizer_config = OptimizerConfig(
             optimizer="AdamW",
             lr_scheduler="StepLR",
             lr_scheduler_params={"step_size": 20},
         )
-        self.model: TabularModel | None = None
-        self.best_params: Dict[str, float] | None = None
-        self.metrics: Dict[str, float] | None = None
-        self.target_cols: List[str] | None = None
+        self.model: Optional[TabularModel] = None
+        self.best_params: Optional[Dict[str, Any]] = None
+        self.metrics: Optional[Dict[str, float]] = None
 
     def fit(
         self,
@@ -133,15 +134,12 @@ class GandalfRegressor(BaseRegressor):
         valid: pd.DataFrame,
         target_cols: List[str],
         check_point_dir: str = "checkpoint",
-    ) -> Tuple[TabularModel, Dict[str, Any]]:
-        """
-        训练 GANDALF 模型
-        """
+    ) -> Tuple[Optional[TabularModel], Dict[str, Any]]:
+        """训练 GANDALF 多目标模型。多目标统一用 MSE 损失（分位损失路线见 TabM）。"""
+        self._check_feature_cols()
         self.target_cols = target_cols
-        # 搜索参数
         self._optuna_search(train, valid)
         self._set_tabular_logging(logging.INFO)
-        # 最优参数训练
         d_cfg, t_cfg, m_cfg = self._build_configs(
             self.best_params, is_tuning=False, check_point_dir=check_point_dir
         )
@@ -152,66 +150,55 @@ class GandalfRegressor(BaseRegressor):
             optimizer_config=self.optimizer_config,
         )
         self.model.fit(train, valid)
-        # 结果评估
         eval_metrics = self.model.evaluate(valid)
         self.metrics = {k: v for d in eval_metrics for k, v in d.items()}
         return self.model, self.metrics
 
     def predict(self, X: pd.DataFrame) -> pd.DataFrame:
-        if not self.model:
-            raise RuntimeError("模型还未训练")
+        self._check_fitted()
         return self.model.predict(X)
 
-    def save_model(self, path: Union[str, Path]):
-        """
-        保存模型
-        """
+    def save_model(self, path: Union[str, Path]) -> None:
+        self._check_fitted()
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.model:
-            raise RuntimeError("模型还未训练")
         self.model.save_model(path)
         meta = {
             "target_cols": self.target_cols,
             "metrics": self.metrics,
             "feature_cols": self.feature_cols,
-            "categorical_cols": self.categorical_cols,
-            "continuous_cols": self.continuous_cols,
-            "date_cols": self.date_cols,
+            "num_cols": self.num_cols,
+            "cat_cols": self.cat_cols,
+            "date_cols_pt": self._date_cols_pt,
             "best_params": self.best_params,
             "random_state": self.random_state,
         }
-        meta_file = path / "meta.json"
-        with open(meta_file, "w", encoding="utf-8") as f:
+        with open(path / "meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=4, ensure_ascii=False)
 
     @classmethod
-    def load_model(cls, save_dir: Union[str, Path]):
-        """
-        加载模型
-        """
+    def load_model(cls, save_dir: Union[str, Path]) -> "GandalfRegressor":
         save_dir = Path(save_dir)
-        meta_file = save_dir / "meta.json"
-        # 读取 meta
-        with open(meta_file, "r", encoding="utf-8") as f:
+        with open(save_dir / "meta.json", "r", encoding="utf-8") as f:
             meta = json.load(f)
-        # 创建实例
         obj = cls(
-            categorical_cols=meta["categorical_cols"],
-            continuous_cols=meta["continuous_cols"],
-            date_cols=meta.get("date_cols", None),
-            random_state=meta.get("random_state", 42),
+            num_cols=meta["num_cols"],
+            cat_cols=meta["cat_cols"],
+            date_cols=meta.get("date_cols_pt"),
+            random_state=meta.get("random_state", RANDOM_STATE),
         )
         obj.target_cols = meta.get("target_cols")
         obj.metrics = meta.get("metrics")
         obj.feature_cols = meta.get("feature_cols")
         obj.best_params = meta.get("best_params")
-        # 加载模型
         obj.model = TabularModel.load_model(save_dir)
         return obj
 
-    def _set_tabular_logging(self, level: int):
-        """ """
+    # ------------------------------------------------------------------
+    # 内部
+    # ------------------------------------------------------------------
+    def _set_tabular_logging(self, level: int) -> None:
+        """调整 pytorch_tabular / lightning 日志级别，避免训练刷屏。"""
         logger_names = [
             "pytorch_tabular",
             "pytorch_tabular.tabular_model",
@@ -240,23 +227,20 @@ class GandalfRegressor(BaseRegressor):
         params: Optional[Dict[str, Any]] = None,
         is_tuning: bool = True,
         check_point_dir: str = "checkpoint",
-    ):
-        """
-        构建参数
-        """
+    ) -> Tuple[DataConfig, TrainerConfig, GANDALFConfig]:
         if not params:
             params = {}
         use_gpu = torch.cuda.is_available() and self.acc == "gpu"
-        self.acc == "gpu" if use_gpu else "cpu"
+        acc = "gpu" if use_gpu else "cpu"
         data_config = DataConfig(
             target=self.target_cols,
-            continuous_cols=self.continuous_cols,
-            categorical_cols=self.categorical_cols,
-            date_columns=self.date_cols,
+            continuous_cols=self.num_cols,
+            categorical_cols=self.cat_cols,
+            date_columns=self._date_cols_pt,
             num_workers=self.num_workers,
         )
         trainer_config = TrainerConfig(
-            accelerator=self.acc,
+            accelerator=acc,
             devices=-1,
             batch_size=self.batch_size,
             max_epochs=min(15, self.max_epochs) if is_tuning else self.max_epochs,
@@ -267,15 +251,11 @@ class GandalfRegressor(BaseRegressor):
             progress_bar="none" if is_tuning else "simple",
             load_best=False if is_tuning else True,
             trainer_kwargs=(
-                {
-                    "enable_model_summary": False,
-                    "enable_checkpointing": False,
-                }
+                {"enable_model_summary": False, "enable_checkpointing": False}
                 if is_tuning
                 else {}
             ),
         )
-
         model_config = GANDALFConfig(
             task="regression",
             learning_rate=params.get("learning_rate", 1e-3),
@@ -286,24 +266,19 @@ class GandalfRegressor(BaseRegressor):
             target_range=None,
             seed=self.random_state,
         )
-
         return data_config, trainer_config, model_config
 
     def _optuna_search(
         self,
         train: pd.DataFrame,
         valid: pd.DataFrame,
-    ):
-        """
-        使用 optuna 对 GANDALF 超参数进行搜索，优化目标为最小化 RMSE。
-        """
+    ) -> None:
+        """optuna 搜索 GANDALF 超参，优化目标为验证集 valid_loss。"""
         self._set_tabular_logging(logging.ERROR)
 
-        def objective(trial):
+        def objective(trial: optuna.Trial) -> float:
             params = {
-                "learning_rate": trial.suggest_float(
-                    "learning_rate", 1e-5, 1e-2, log=True
-                ),
+                "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True),
                 "gflu_stages": trial.suggest_int("gflu_stages", 3, 15),
                 "gflu_dropout": trial.suggest_float("gflu_dropout", 0, 0.5),
                 "gflu_feature_init_sparsity": trial.suggest_float(
@@ -320,16 +295,15 @@ class GandalfRegressor(BaseRegressor):
                 )
                 model.fit(train, valid)
                 score = model.trainer.callback_metrics["valid_loss"].item()
-                # 清理显存
                 del model
                 gc.collect()
                 torch.cuda.empty_cache()
-            return score
+            return float(score)
 
         study = optuna.create_study(
             direction="minimize",
             sampler=optuna.samplers.TPESampler(
-                n_startup_trials=self.n_trials // 10,
+                n_startup_trials=max(1, self.n_trials // 10),
                 seed=self.random_state,
                 multivariate=True,
             ),
