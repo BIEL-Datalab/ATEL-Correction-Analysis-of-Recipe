@@ -24,3 +24,6 @@ PROMPT_RULES_TEMPLATE.md
 recipe项目.txt
 项目代码结构说明.md
 docs/
+
+# CatBoost 运行残留
+catboost_info/
