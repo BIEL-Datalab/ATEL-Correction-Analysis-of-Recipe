@@ -436,8 +436,18 @@ class TabMRegressor(BaseRegressor):
     # ------------------------------------------------------------------
     @torch.no_grad()
     def _predict_raw(self, df: pd.DataFrame) -> torch.Tensor:
-        """预测（标准化空间），返回 (n_samples, n_targets) 的 k 路均值。"""
+        """预测（标准化空间），返回 (n_samples, n_targets) 的 k 路均值。
+
+        注意：预测输入 df 不一定含 target_cols（推理场景），_encode 会因取不到 y 而报错。
+        这里用一个全 NaN 的占位 y 让 _encode 通过（预测阶段 y 无意义）。
+        """
         self._check_fitted()
+        # 推理时 df 可能无 target 列，补全 NaN 占位以复用 _encode
+        if not all(t in df.columns for t in self.target_cols):
+            df = df.copy()
+            for t in self.target_cols:
+                if t not in df.columns:
+                    df[t] = np.nan
         x_num, x_cat, _ = self._encode(df)
         x_num_t = torch.as_tensor(x_num) if x_num is not None else None
         x_cat_t = torch.as_tensor(x_cat) if x_cat is not None else None

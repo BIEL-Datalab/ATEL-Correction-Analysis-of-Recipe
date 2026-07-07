@@ -292,12 +292,24 @@ class RegressionEvaluator:
         if not getattr(model, "multi_target", False):
             raise ValueError("单目标模型请以 {target: model} 字典形式传入")
 
+        # 多目标模型 predict 可能返回列名带 _prediction 后缀（pytorch_tabular）或裸 target
+        # 这里统一按 target_cols 顺序取预测列
         def predict_func(X_np: np.ndarray) -> np.ndarray:
             X_df = pd.DataFrame(X_np, columns=self.feature_cols)
             preds = model.predict(X_df)
             if isinstance(preds, pd.DataFrame):
-                pred_cols = [c for c in preds.columns if c in target_cols]
-                return preds[pred_cols].values
+                # 优先精确匹配，其次匹配 {target}_prediction 后缀列
+                cols = []
+                for t in target_cols:
+                    if t in preds.columns:
+                        cols.append(t)
+                    else:
+                        suf = f"{t}_prediction"
+                        cols.append(suf if suf in preds.columns else None)
+                if all(c is not None for c in cols):
+                    return preds[cols].values
+                # 兜底：取前 len(target_cols) 列
+                return preds.iloc[:, : len(target_cols)].values
             return np.asarray(preds)
 
         bg = X_sample.sample(min(bg_sample, len(X_sample)), random_state=self.random_state)
